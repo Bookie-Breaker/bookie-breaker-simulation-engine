@@ -38,6 +38,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         title="BookieBreaker Simulation Engine",
         version=__version__,
         description="Monte Carlo simulations for sports outcome distributions.",
+        contact={
+            "name": "BookieBreaker",
+            "url": "https://github.com/Bookie-Breaker",
+            "email": "jsamuelsen11@gmail.com",
+        },
+        license_info={"name": "MIT", "url": "https://opensource.org/licenses/MIT"},
+        servers=[{"url": "http://localhost:8003", "description": "Local development"}],
+        openapi_tags=[
+            {"name": "games", "description": "Game-scoped simulation lookups."},
+            {"name": "health", "description": "Service health and load."},
+            {"name": "simulations", "description": "Run Monte Carlo simulations and fetch their results."},
+        ],
         lifespan=lifespan,
     )
     app.add_middleware(RequestIDMiddleware)
