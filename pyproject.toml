@@ -1,11 +1,37 @@
 [project]
+dependencies = [
+  "fastapi>=0.115",
+  "httpx>=0.28",
+  "numpy>=2.1",
+  "opentelemetry-exporter-otlp-proto-grpc>=1.29",
+  "opentelemetry-instrumentation-fastapi>=0.50b0",
+  "opentelemetry-instrumentation-httpx>=0.50b0",
+  "opentelemetry-instrumentation-redis>=0.50b0",
+  "opentelemetry-sdk>=1.29",
+  "pydantic>=2.9",
+  "pydantic-settings>=2.6",
+  "redis>=5.2",
+  "uvicorn[standard]>=0.34",
+]
 description = "Monte Carlo simulation engine for sports outcome distributions"
 name = "simulation-engine"
 requires-python = ">=3.12"
 version = "0.1.0"
 
 [dependency-groups]
-dev = ["ruff", "mypy", "pytest", "pytest-cov", "pip-audit"]
+dev = [
+  "ruff",
+  "mypy",
+  "pytest",
+  "pytest-asyncio",
+  "pytest-cov",
+  "pip-audit",
+  "fakeredis",
+  "pyyaml",
+  "respx",
+  "testcontainers[redis]",
+  "types-pyyaml",
+]
 
 [tool.ruff]
 line-length = 120
@@ -20,6 +46,12 @@ strict = true
 warn_return_any = true
 warn_unused_configs = true
 
+[[tool.mypy.overrides]]
+ignore_missing_imports = true
+module = ["opentelemetry.instrumentation.*"]
+
 [tool.pytest.ini_options]
+asyncio_default_fixture_loop_scope = "session"
+asyncio_mode = "auto"
 pythonpath = ["src"]
 testpaths = ["tests"]

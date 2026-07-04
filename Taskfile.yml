@@ -15,7 +15,7 @@ tasks:
   dev:
     desc: "Run with hot reload"
     cmds:
-      - uv run uvicorn src.simulation_engine.main:app --reload --port 8003
+      - uv run uvicorn --app-dir src simulation_engine.main:app --reload --port 8003
 
   lint:
     desc: "Run linters"
@@ -32,3 +32,15 @@ tasks:
     desc: "Run type checker"
     cmds:
       - uv run mypy src/
+
+  spec:export:
+    desc: "Export the generated OpenAPI spec to the docs repo (ADR-021)"
+    cmds:
+      - uv run python scripts/export_openapi.py --out
+        ../bookie-breaker-docs/api-contracts/openapi/simulation-engine.yaml
+
+  spec:check:
+    desc: "Verify the committed OpenAPI artifact matches the served spec"
+    cmds:
+      - uv run python scripts/export_openapi.py | diff -
+        ../bookie-breaker-docs/api-contracts/openapi/simulation-engine.yaml
