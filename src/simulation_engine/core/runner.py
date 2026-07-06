@@ -15,7 +15,7 @@ import numpy.typing as npt
 
 from simulation_engine.core.convergence import ConvergenceTracker
 from simulation_engine.core.framework import GameSimulator
-from simulation_engine.core.params import GameContext, TeamParams
+from simulation_engine.core.params import GameContext, SportParams
 
 
 @dataclass(frozen=True)
@@ -85,8 +85,8 @@ def _total_lines(total_mean: float, radius: int) -> list[float]:
 
 def run_monte_carlo(
     simulator: GameSimulator,
-    home_params: TeamParams,
-    away_params: TeamParams,
+    home_params: SportParams,
+    away_params: SportParams,
     context: GameContext,
     iterations: int = 10_000,
     convergence_threshold: float = 0.005,

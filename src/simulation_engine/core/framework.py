@@ -12,7 +12,7 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 
-from simulation_engine.core.params import GameContext, TeamParams
+from simulation_engine.core.params import GameContext, SportParams
 
 
 @dataclass
@@ -32,8 +32,12 @@ class GameSimulator(ABC):
         self._plugin_config: dict[str, object] = plugin_config or {}
 
     @abstractmethod
-    def set_parameters(self, home_params: TeamParams, away_params: TeamParams, context: GameContext) -> None:
-        """Load team parameters (from statistics-service data) and game context."""
+    def set_parameters(self, home_params: SportParams, away_params: SportParams, context: GameContext) -> None:
+        """Load team parameters (from statistics-service data) and game context.
+
+        Plugins receive the params their PluginSpec mapper produced and narrow
+        to their own SportParams subclass.
+        """
 
     @abstractmethod
     def simulate_game(self, rng: np.random.Generator) -> GameResult:
