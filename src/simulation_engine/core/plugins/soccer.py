@@ -13,7 +13,6 @@ on (ADR-027). One simulator serves every SOCCER league; competitions differ
 only by plugin config (FIFA_WC vs EPL base rates and home multiplier).
 """
 
-import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -23,6 +22,7 @@ from simulation_engine.clients.statistics import TeamStats
 from simulation_engine.core import league_averages as lg
 from simulation_engine.core.framework import GameResult, GameSimulator
 from simulation_engine.core.params import GameContext, SportParams
+from simulation_engine.core.poisson_grid import build_goal_grid, poisson_pmf, sample_grid
 
 _MAX_GOALS = 12
 _GRID_SIZE = _MAX_GOALS + 1
@@ -62,31 +62,17 @@ def map_soccer_stats(stats: TeamStats) -> SoccerParams:
 
 
 def _poisson_pmf(lam: float) -> npt.NDArray[np.float64]:
-    """Poisson PMF over 0..12 via the stable multiplicative recurrence."""
-    pmf = np.empty(_GRID_SIZE, dtype=np.float64)
-    pmf[0] = math.exp(-lam)
-    for k in range(1, _GRID_SIZE):
-        pmf[k] = pmf[k - 1] * lam / k
-    return pmf
+    """Poisson PMF over 0..12 (soccer-sized shim over the shared helper)."""
+    return poisson_pmf(lam, _GRID_SIZE)
 
 
 def _build_goal_grid(lam_home: float, lam_away: float, rho: float) -> npt.NDArray[np.float64]:
-    """13x13 joint score PMF: independent Poissons with the Dixon-Coles tau.
+    """13x13 Dixon-Coles joint score PMF (soccer-sized shim over the shared helper).
 
-    Rows are home goals, columns are away goals. The tau correction rescales
-    the four low-score cells (with lambda = lam_home, mu = lam_away):
-    tau(0,0) = 1 - lambda*mu*rho, tau(1,0) = 1 + mu*rho,
-    tau(0,1) = 1 + lambda*rho, tau(1,1) = 1 - rho. Any cell driven negative is
-    clamped to zero and the grid is renormalized to sum to exactly 1.
+    The grid machinery moved to core/poisson_grid.py in Phase 6 Wave 4 so the
+    hockey plugin can reuse it with its own grid size and rho.
     """
-    grid = np.outer(_poisson_pmf(lam_home), _poisson_pmf(lam_away))
-    grid[0, 0] *= 1.0 - lam_home * lam_away * rho
-    grid[1, 0] *= 1.0 + lam_away * rho
-    grid[0, 1] *= 1.0 + lam_home * rho
-    grid[1, 1] *= 1.0 - rho
-    np.clip(grid, 0.0, None, out=grid)
-    normalized: npt.NDArray[np.float64] = grid / grid.sum()
-    return normalized
+    return build_goal_grid(lam_home, lam_away, rho, _GRID_SIZE)
 
 
 def _config_float(config: dict[str, object], key: str, default: float) -> float:
@@ -134,10 +120,7 @@ class SoccerSimulator(GameSimulator):
         return self._cdf
 
     def simulate_games(self, rng: np.random.Generator, n: int) -> tuple[npt.NDArray[np.int32], npt.NDArray[np.int32]]:
-        cdf = self._require_cdf()
-        indices = np.searchsorted(cdf, rng.random(n), side="right")
-        home_scores, away_scores = np.divmod(indices, _GRID_SIZE)
-        return home_scores.astype(np.int32), away_scores.astype(np.int32)
+        return sample_grid(rng, self._require_cdf(), _GRID_SIZE, n)
 
     def simulate_game(self, rng: np.random.Generator) -> GameResult:
         home, away = self.simulate_games(rng, 1)

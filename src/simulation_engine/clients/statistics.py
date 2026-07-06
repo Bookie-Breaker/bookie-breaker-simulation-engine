@@ -114,6 +114,40 @@ class BaseballStats(BaseModel):
     bullpen_era: float = 0.0
 
 
+class FootballStats(BaseModel):
+    """Football-specific stat block (FOOTBALL-sport leagues only; ADR-026).
+
+    EPA metrics come from nflverse team stats (NFL) and are absent for
+    NCAA_FB, which carries SP+ ratings from CFBD instead.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    points_per_game: float = 0.0
+    points_allowed_per_game: float = 0.0
+    drives_per_game: float = 0.0
+    points_per_drive_off: float = 0.0
+    points_per_drive_def: float = 0.0
+    epa_per_play_off: float = 0.0
+    epa_per_play_def: float = 0.0
+    turnover_margin_per_game: float = 0.0
+    sp_plus_rating: float = 0.0
+
+
+class HockeyStats(BaseModel):
+    """Hockey-specific stat block (HOCKEY-sport leagues only; ADR-026)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    goals_for_per_game: float = 0.0
+    goals_against_per_game: float = 0.0
+    shots_for_per_game: float = 0.0
+    shots_against_per_game: float = 0.0
+    power_play_pct: float = 0.0
+    penalty_kill_pct: float = 0.0
+    team_save_pct: float = 0.0
+
+
 class StatBlocks(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -122,6 +156,8 @@ class StatBlocks(BaseModel):
     advanced: AdvancedStats = AdvancedStats()
     soccer: SoccerStats = SoccerStats()
     baseball: BaseballStats = BaseballStats()
+    football: FootballStats = FootballStats()
+    hockey: HockeyStats = HockeyStats()
 
 
 class TeamStatsResponse(BaseModel):
@@ -143,6 +179,8 @@ class TeamStats(BaseModel):
     advanced: AdvancedStats
     soccer: SoccerStats = SoccerStats()
     baseball: BaseballStats = BaseballStats()
+    football: FootballStats = FootballStats()
+    hockey: HockeyStats = HockeyStats()
 
 
 class StatisticsClient:
@@ -183,6 +221,8 @@ class StatisticsClient:
             advanced=parsed.stats.advanced,
             soccer=parsed.stats.soccer,
             baseball=parsed.stats.baseball,
+            football=parsed.stats.football,
+            hockey=parsed.stats.hockey,
         )
 
     async def is_healthy(self) -> bool:
