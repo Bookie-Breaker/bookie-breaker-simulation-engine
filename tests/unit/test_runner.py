@@ -6,7 +6,7 @@ import pytest
 
 from simulation_engine.core.framework import GameResult, GameSimulator
 from simulation_engine.core.params import GameContext, TeamParams
-from simulation_engine.core.runner import run_monte_carlo
+from simulation_engine.core.runner import BASKETBALL_GRID_CONFIG, GridConfig, run_monte_carlo
 
 
 class FakeSimulator(GameSimulator):
@@ -90,6 +90,73 @@ class TestRunner:
         # over probabilities decrease as the line rises
         over_probs = [out.total_overs[line] for line in total_lines]
         assert all(a >= b for a, b in zip(over_probs, over_probs[1:], strict=False))
+
+
+class TestGridConfig:
+    def test_default_grid_is_basketball(self, make_team_params) -> None:
+        assert GridConfig(spread_radius=10, total_radius=12) == BASKETBALL_GRID_CONFIG
+        out = run(FakeSimulator(), make_team_params, iterations=3000, convergence_threshold=1e-9, seed=1)
+        # radius r yields 2r + 2 half-point lines
+        assert len(out.spread_covers) == 22
+        assert len(out.total_overs) == 26
+
+    def test_custom_radii_resize_grids(self, make_team_params) -> None:
+        out = run(
+            FakeSimulator(),
+            make_team_params,
+            iterations=3000,
+            convergence_threshold=1e-9,
+            seed=1,
+            grid_config=GridConfig(spread_radius=3, total_radius=4),
+        )
+        assert len(out.spread_covers) == 8
+        assert len(out.total_overs) == 10
+        assert sorted(out.spread_covers)[0] < -out.margin_mean < sorted(out.spread_covers)[-1]
+        assert sorted(out.total_overs)[0] < out.total_mean < sorted(out.total_overs)[-1]
+
+
+class TestPushProbabilities:
+    def test_half_point_default_grids_have_no_pushes(self, make_team_params) -> None:
+        out = run(FakeSimulator(), make_team_params, iterations=3000, convergence_threshold=1e-9, seed=1)
+        assert out.spread_pushes == {}
+        assert out.total_pushes == {}
+
+    def test_integer_lines_expose_push_probability(self, make_team_params) -> None:
+        out = run(
+            FakeSimulator(),
+            make_team_params,
+            iterations=4000,
+            convergence_threshold=1e-9,
+            seed=3,
+            common_spreads=[-3.0, 2.5],
+            common_totals=[220.0, 219.5],
+        )
+        # only integer lines appear in the push maps
+        assert set(out.spread_pushes) == {-3.0}
+        assert set(out.total_pushes) == {220.0}
+        # home -3 pushes when margin == 3; total 220 pushes when total == 220
+        assert out.spread_pushes[-3.0] == pytest.approx(float(np.mean(out.margins == 3)))
+        assert out.total_pushes[220.0] == pytest.approx(float(np.mean(out.totals == 220)))
+        assert out.spread_pushes[-3.0] > 0.0
+        assert out.total_pushes[220.0] > 0.0
+
+    def test_cover_semantics_unchanged_and_partition_with_push(self, make_team_params) -> None:
+        out = run(
+            FakeSimulator(),
+            make_team_params,
+            iterations=4000,
+            convergence_threshold=1e-9,
+            seed=3,
+            common_spreads=[-3.0],
+            common_totals=[220.0],
+        )
+        # covers keep strictly-greater-than semantics; win/push/loss partition to 1
+        assert out.spread_covers[-3.0] == pytest.approx(float(np.mean(out.margins > 3)))
+        spread_loss = float(np.mean(out.margins < 3))
+        assert out.spread_covers[-3.0] + out.spread_pushes[-3.0] + spread_loss == pytest.approx(1.0)
+        assert out.total_overs[220.0] == pytest.approx(float(np.mean(out.totals > 220)))
+        total_under = float(np.mean(out.totals < 220))
+        assert out.total_overs[220.0] + out.total_pushes[220.0] + total_under == pytest.approx(1.0)
 
 
 class TestSeedReproducibility:

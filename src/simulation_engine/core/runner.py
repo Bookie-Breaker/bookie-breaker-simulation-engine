@@ -17,8 +17,23 @@ from simulation_engine.core.convergence import ConvergenceTracker
 from simulation_engine.core.framework import GameSimulator
 from simulation_engine.core.params import GameContext, TeamParams
 
-_SPREAD_GRID_RADIUS = 10  # half-point handicaps within +/- this of the mean margin
-_TOTAL_GRID_RADIUS = 12  # half-point totals within +/- this of the mean total
+
+@dataclass(frozen=True)
+class GridConfig:
+    """Per-sport radii for the default spread/total line grids.
+
+    The grids enumerate half-point lines within +/- the radius of the mean
+    margin (spreads) and mean total (totals). High-scoring sports use wide
+    radii (basketball 10/12); low-scoring sports use narrow ones (e.g.
+    soccer 3/4).
+    """
+
+    spread_radius: int  # half-point handicaps within +/- this of the mean margin
+    total_radius: int  # half-point totals within +/- this of the mean total
+
+
+#: Basketball's grid radii — the pre-Phase-6 hardcoded defaults.
+BASKETBALL_GRID_CONFIG = GridConfig(spread_radius=10, total_radius=12)
 
 
 @dataclass
@@ -49,17 +64,23 @@ class SimulationOutput:
     # {total line: P(over)}
     total_overs: dict[float, float] = field(default_factory=dict)
 
+    # Push probabilities for INTEGER lines only — half-point lines cannot
+    # push and are omitted. {home handicap h: P(margin == -h)}.
+    spread_pushes: dict[float, float] = field(default_factory=dict)
+    # {total line t: P(total == t)} for integer lines only.
+    total_pushes: dict[float, float] = field(default_factory=dict)
+
     elapsed_ms: float = 0.0
 
 
-def _spread_lines(margin_mean: float) -> list[float]:
+def _spread_lines(margin_mean: float, radius: int) -> list[float]:
     center = -round(margin_mean)
-    return [center + k + 0.5 for k in range(-_SPREAD_GRID_RADIUS - 1, _SPREAD_GRID_RADIUS + 1)]
+    return [center + k + 0.5 for k in range(-radius - 1, radius + 1)]
 
 
-def _total_lines(total_mean: float) -> list[float]:
+def _total_lines(total_mean: float, radius: int) -> list[float]:
     center = round(total_mean)
-    return [center + k + 0.5 for k in range(-_TOTAL_GRID_RADIUS - 1, _TOTAL_GRID_RADIUS + 1)]
+    return [center + k + 0.5 for k in range(-radius - 1, radius + 1)]
 
 
 def run_monte_carlo(
@@ -73,6 +94,7 @@ def run_monte_carlo(
     seed: int | None = None,
     common_spreads: list[float] | None = None,
     common_totals: list[float] | None = None,
+    grid_config: GridConfig = BASKETBALL_GRID_CONFIG,
 ) -> SimulationOutput:
     started = time.perf_counter()
     rng = np.random.default_rng(seed)
@@ -109,15 +131,21 @@ def run_monte_carlo(
     margin_mean = float(np.mean(margins))
     total_mean = float(np.mean(totals))
 
+    spread_line_values = (
+        common_spreads if common_spreads is not None else _spread_lines(margin_mean, grid_config.spread_radius)
+    )
+    total_line_values = (
+        common_totals if common_totals is not None else _total_lines(total_mean, grid_config.total_radius)
+    )
     spread_covers = {
         # home handicap h covers when margin > -h (home -3.5 needs margin > 3.5)
         float(h): float(np.mean(margins > -h))
-        for h in (common_spreads if common_spreads is not None else _spread_lines(margin_mean))
+        for h in spread_line_values
     }
-    total_overs = {
-        float(t): float(np.mean(totals > t))
-        for t in (common_totals if common_totals is not None else _total_lines(total_mean))
-    }
+    total_overs = {float(t): float(np.mean(totals > t)) for t in total_line_values}
+    # Pushes exist only on integer lines; half-point lines are omitted entirely.
+    spread_pushes = {float(h): float(np.mean(margins == -h)) for h in spread_line_values if float(h).is_integer()}
+    total_pushes = {float(t): float(np.mean(totals == t)) for t in total_line_values if float(t).is_integer()}
 
     return SimulationOutput(
         iterations_run=n,
@@ -137,5 +165,7 @@ def run_monte_carlo(
         total_std=float(np.std(totals, ddof=1)),
         spread_covers=spread_covers,
         total_overs=total_overs,
+        spread_pushes=spread_pushes,
+        total_pushes=total_pushes,
         elapsed_ms=(time.perf_counter() - started) * 1000.0,
     )

@@ -27,6 +27,10 @@ class GameResult:
 class GameSimulator(ABC):
     """Interface that all sport-specific simulation plugins implement."""
 
+    def __init__(self, plugin_config: dict[str, object] | None = None) -> None:
+        """Registry construction contract: plugins accept an optional plugin-config dict."""
+        self._plugin_config: dict[str, object] = plugin_config or {}
+
     @abstractmethod
     def set_parameters(self, home_params: TeamParams, away_params: TeamParams, context: GameContext) -> None:
         """Load team parameters (from statistics-service data) and game context."""
@@ -51,8 +55,10 @@ class GameSimulator(ABC):
 
     @abstractmethod
     def get_sport(self) -> str:
-        """Return sport identifier: 'FOOTBALL', 'BASKETBALL', or 'BASEBALL'."""
+        """Return sport identifier: 'FOOTBALL', 'BASKETBALL', 'BASEBALL', 'SOCCER', or 'HOCKEY'."""
 
     @abstractmethod
     def get_league(self) -> str:
-        """Return league identifier: 'NFL', 'NCAA_FB', 'NBA', 'NCAA_BB', 'MLB', 'NCAA_BSB'."""
+        """Return league identifier: 'NFL', 'NCAA_FB', 'NBA', 'NCAA_BB', 'MLB', 'NCAA_BSB',
+        'FIFA_WC', 'EPL', 'NHL', or 'NCAA_HKY' (per ADR-026).
+        """

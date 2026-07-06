@@ -30,8 +30,8 @@ from simulation_engine.clients.statistics import StatisticsClient
 from simulation_engine.config import Settings
 from simulation_engine.core.hashing import compute_parameters_hash
 from simulation_engine.core.output import build_distributions, build_result
-from simulation_engine.core.params import GameContext, map_team_stats
-from simulation_engine.core.plugins import get_simulator
+from simulation_engine.core.params import GameContext
+from simulation_engine.core.plugins import get_plugin
 from simulation_engine.core.runner import run_monte_carlo
 from simulation_engine.events.publisher import publish_simulation_completed
 
@@ -90,15 +90,18 @@ class SimulationService:
         if game.status in _TERMINAL_GAME_STATUSES:
             raise UnprocessableError(f"Game {game_id} is {game.status}; simulation is not applicable")
 
+        spec = get_plugin(game.league)
         home_stats, away_stats = await asyncio.gather(
             self._statistics.get_team_stats(game.home_team.id),
             self._statistics.get_team_stats(game.away_team.id),
         )
-        home_params = map_team_stats(home_stats)
-        away_params = map_team_stats(away_stats)
+        home_params = spec.map_team_stats(home_stats)
+        away_params = spec.map_team_stats(away_stats)
         context = GameContext(league=game.league)
         config_dict = config.model_dump(mode="json")
-        parameters_hash = compute_parameters_hash(game_id, home_params, away_params, context, config_dict)
+        parameters_hash = compute_parameters_hash(
+            game_id, home_params, away_params, context, config_dict, plugin_label=spec.label
+        )
 
         if not force_refresh:
             cached_run_id = await self._cache.get_cached_run_id(game_id, parameters_hash)
@@ -107,7 +110,7 @@ class SimulationService:
                 if cached_run is not None:
                     return cached_run.model_copy(update={"cached": True})
 
-        simulator = get_simulator(game.league, config.plugin_config)
+        simulator = spec.simulator({**spec.plugin_config, **config.plugin_config})
         started_at = _utc_now_iso()
         self._queued += 1
         async with self._semaphore:
@@ -124,6 +127,7 @@ class SimulationService:
                     config.convergence_threshold,
                     self._settings.convergence_check_interval,
                     config.random_seed,
+                    grid_config=spec.grid_config,
                 )
             finally:
                 self._active -= 1

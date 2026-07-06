@@ -7,9 +7,10 @@ assertions statistically comfortable.
 import numpy as np
 import pytest
 
-from simulation_engine.core.params import GameContext
-from simulation_engine.core.plugins import get_simulator
+from simulation_engine.core.params import GameContext, map_team_stats
+from simulation_engine.core.plugins import PluginSpec, get_plugin, get_simulator
 from simulation_engine.core.plugins.basketball import BasketballSimulator, _build_possession_pmf
+from simulation_engine.core.runner import GridConfig
 
 NEUTRAL = GameContext(neutral_site=True)
 HOME = GameContext()
@@ -99,3 +100,25 @@ class TestPluginRegistry:
         result = sim.simulate_game(np.random.default_rng(1))
         assert result.home_score != result.away_score
         assert result.home_score > 60
+
+
+class TestPluginSpecs:
+    def test_nba_spec_fields(self) -> None:
+        spec = get_plugin("nba")
+        assert isinstance(spec, PluginSpec)
+        assert spec.label == "basketball"
+        assert spec.simulator is BasketballSimulator
+        assert spec.map_team_stats is map_team_stats
+        assert spec.grid_config == GridConfig(spread_radius=10, total_radius=12)
+        assert spec.plugin_config == {}
+
+    def test_unsupported_league_message_lists_supported(self) -> None:
+        from simulation_engine.api.errors import UnprocessableError
+
+        with pytest.raises(UnprocessableError, match=r"not supported for simulation \(supported: NBA\)"):
+            get_plugin("EPL")
+
+    def test_shim_applies_request_plugin_config_over_defaults(self, make_team_params) -> None:
+        sim = get_simulator("NBA", {"home_advantage": 6.0})
+        assert isinstance(sim, BasketballSimulator)
+        assert sim._home_advantage == 6.0

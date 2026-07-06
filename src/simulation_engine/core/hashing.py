@@ -2,8 +2,11 @@
 
 The hash covers everything that determines a simulation's output: the game,
 both teams' parameters, game context, the effective config, and an engine
-version. Bump ENGINE_VERSION whenever plugin math changes so stale cached
-results are never served across deployments.
+identity (the plugin label plus a version). Callers pass the registry's
+``PluginSpec.label`` as ``plugin_label`` so different sports never collide in
+the cache; the default preserves pre-Phase-6 NBA hashes byte-for-byte. Bump
+ENGINE_VERSION whenever plugin math changes so stale cached results are never
+served across deployments.
 """
 
 import hashlib
@@ -33,6 +36,7 @@ def compute_parameters_hash(
     away_params: TeamParams,
     context: GameContext,
     config: dict[str, Any],
+    plugin_label: str = "basketball",
 ) -> str:
     payload = _canonicalize(
         {
@@ -41,7 +45,7 @@ def compute_parameters_hash(
             "away_params": asdict(away_params),
             "context": asdict(context),
             "config": config,
-            "engine": {"plugin": "basketball", "version": ENGINE_VERSION},
+            "engine": {"plugin": plugin_label, "version": ENGINE_VERSION},
         }
     )
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))

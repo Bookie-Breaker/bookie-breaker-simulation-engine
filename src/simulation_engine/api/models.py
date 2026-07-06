@@ -33,6 +33,14 @@ class Percentiles(BaseModel):
 
 
 class SimulationResultData(BaseModel):
+    """Aggregated simulation result.
+
+    ``spread_push_probabilities`` / ``total_push_probabilities`` carry
+    P(margin == line) / P(total == line) for INTEGER lines only — half-point
+    lines cannot push and are omitted rather than serialized as 0.0. Cover
+    and over probabilities are unchanged: strictly-greater-than semantics.
+    """
+
     id: str
     home_win_probability: float
     away_win_probability: float
@@ -43,6 +51,8 @@ class SimulationResultData(BaseModel):
     mean_margin: float
     spread_cover_probabilities: dict[str, float]
     total_over_probabilities: dict[str, float]
+    spread_push_probabilities: dict[str, float] = Field(default_factory=dict)
+    total_push_probabilities: dict[str, float] = Field(default_factory=dict)
     percentiles: Percentiles
 
 

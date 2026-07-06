@@ -75,6 +75,21 @@ class TestBuildResult:
             assert values == sorted(values)
 
 
+class TestPushSerialization:
+    def test_push_maps_default_empty(self) -> None:
+        result = build_result(make_output(), "res-1")
+        assert result.spread_push_probabilities == {}
+        assert result.total_push_probabilities == {}
+
+    def test_integer_push_keys_signed_and_rounded(self) -> None:
+        output = make_output()
+        output.spread_pushes = {-3.0: 0.06789, 2.0: 0.05}
+        output.total_pushes = {220.0: 0.04321}
+        result = build_result(output, "res-1")
+        assert result.spread_push_probabilities == {"-3.0": 0.0679, "+2.0": 0.05}
+        assert result.total_push_probabilities == {"220.0": 0.0432}
+
+
 class TestBuildDistributions:
     def test_all_four_distributions_present(self) -> None:
         distributions = build_distributions(make_output())
