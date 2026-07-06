@@ -34,3 +34,21 @@ class TestParametersHash:
         assert base != compute_parameters_hash("g2", h, a, GameContext(), dict(CONFIG))
         assert base != compute_parameters_hash("g1", h, a, GameContext(), {**CONFIG, "random_seed": 42})
         assert base != compute_parameters_hash("g1", h, a, GameContext(), {**CONFIG, "iterations": 20_000})
+
+
+class TestPluginLabel:
+    # Hex digest produced by the pre-Phase-6 implementation (hardcoded
+    # "basketball" engine label) for the conftest default parameters,
+    # computed on main at commit 1d49f09 before the plugin_label refactor.
+    PRE_REFACTOR_NBA_HASH = "713ff2a6c08b"
+
+    def test_nba_parity_with_pre_refactor_hash(self, make_team_params) -> None:
+        h, a = make_team_params("h"), make_team_params("a")
+        assert compute_parameters_hash("g1", h, a, GameContext(), dict(CONFIG)) == self.PRE_REFACTOR_NBA_HASH
+        explicit = compute_parameters_hash("g1", h, a, GameContext(), dict(CONFIG), plugin_label="basketball")
+        assert explicit == self.PRE_REFACTOR_NBA_HASH
+
+    def test_sensitive_to_plugin_label(self, make_team_params) -> None:
+        h, a = make_team_params("h"), make_team_params("a")
+        base = compute_parameters_hash("g1", h, a, GameContext(), dict(CONFIG))
+        assert base != compute_parameters_hash("g1", h, a, GameContext(), dict(CONFIG), plugin_label="soccer")

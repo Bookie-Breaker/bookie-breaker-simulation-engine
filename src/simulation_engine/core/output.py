@@ -26,6 +26,9 @@ def build_result(output: SimulationOutput, result_id: str) -> SimulationResultDa
         # Keys are home handicaps from the home perspective: "-3.5" means home -3.5
         spread_cover_probabilities={f"{line:+.1f}": round(p, 4) for line, p in sorted(output.spread_covers.items())},
         total_over_probabilities={f"{line:.1f}": round(p, 4) for line, p in sorted(output.total_overs.items())},
+        # Integer lines only; half-point lines cannot push and are omitted
+        spread_push_probabilities={f"{line:+.1f}": round(p, 4) for line, p in sorted(output.spread_pushes.items())},
+        total_push_probabilities={f"{line:.1f}": round(p, 4) for line, p in sorted(output.total_pushes.items())},
         percentiles=Percentiles(margin=_percentiles(output.margins), total=_percentiles(output.totals)),
     )
 
