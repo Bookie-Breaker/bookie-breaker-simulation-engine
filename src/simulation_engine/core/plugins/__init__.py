@@ -5,10 +5,15 @@ from dataclasses import dataclass, field
 
 from simulation_engine.api.errors import UnprocessableError
 from simulation_engine.clients.statistics import TeamStats
+from simulation_engine.core import league_averages as lg
 from simulation_engine.core.framework import GameSimulator
-from simulation_engine.core.params import TeamParams, map_team_stats
+from simulation_engine.core.params import SportParams, map_team_stats
 from simulation_engine.core.plugins.basketball import BasketballSimulator
+from simulation_engine.core.plugins.soccer import SoccerSimulator, map_soccer_stats
 from simulation_engine.core.runner import BASKETBALL_GRID_CONFIG, GridConfig
+
+#: Soccer's narrow line grids — goals, not points (components/simulation-engine.md).
+SOCCER_GRID_CONFIG = GridConfig(spread_radius=3, total_radius=4)
 
 
 @dataclass(frozen=True)
@@ -28,7 +33,7 @@ class PluginSpec:
 
     label: str
     simulator: type[GameSimulator]
-    map_team_stats: Callable[[TeamStats], TeamParams]
+    map_team_stats: Callable[[TeamStats], SportParams]
     grid_config: GridConfig
     plugin_config: dict[str, object] = field(default_factory=dict)
 
@@ -40,6 +45,31 @@ _PLUGINS: dict[str, PluginSpec] = {
         map_team_stats=map_team_stats,
         grid_config=BASKETBALL_GRID_CONFIG,
         plugin_config={},
+    ),
+    # One soccer simulator serves every SOCCER competition (ADR-026); leagues
+    # differ only by configuration. FIFA_WC plays at neutral venues, so its
+    # home multiplier is 1.0.
+    "FIFA_WC": PluginSpec(
+        label="soccer",
+        simulator=SoccerSimulator,
+        map_team_stats=map_soccer_stats,
+        grid_config=SOCCER_GRID_CONFIG,
+        plugin_config={
+            "base_goals_per_team": lg.SOCCER_WC_BASE_GOALS_PER_TEAM,
+            "home_goal_multiplier": 1.0,
+            "dc_rho": lg.SOCCER_DC_RHO,
+        },
+    ),
+    "EPL": PluginSpec(
+        label="soccer",
+        simulator=SoccerSimulator,
+        map_team_stats=map_soccer_stats,
+        grid_config=SOCCER_GRID_CONFIG,
+        plugin_config={
+            "base_goals_per_team": lg.SOCCER_EPL_BASE_GOALS_PER_TEAM,
+            "home_goal_multiplier": lg.SOCCER_EPL_HOME_GOAL_MULTIPLIER,
+            "dc_rho": lg.SOCCER_DC_RHO,
+        },
     ),
 }
 

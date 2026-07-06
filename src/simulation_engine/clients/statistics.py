@@ -56,12 +56,32 @@ class AdvancedStats(BaseModel):
     offensive_rebound_pct: float = 0.0
 
 
+class SoccerStats(BaseModel):
+    """Soccer-specific stat block (SOCCER-sport leagues only; ADR-026).
+
+    Strengths are multiplicative factors relative to the competition average
+    (1.0 = average), shrunk toward 1.0 by matches played to damp small samples.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    goals_for_per_match: float = 0.0
+    goals_against_per_match: float = 0.0
+    attack_strength: float = 0.0
+    defense_strength: float = 0.0
+    draws: int = 0
+    form_goals_for_last5: float = 0.0
+    form_goals_against_last5: float = 0.0
+    form_points_last5: int = 0
+
+
 class StatBlocks(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     offensive: OffensiveStats = OffensiveStats()
     defensive: DefensiveStats = DefensiveStats()
     advanced: AdvancedStats = AdvancedStats()
+    soccer: SoccerStats = SoccerStats()
 
 
 class TeamStatsResponse(BaseModel):
@@ -81,6 +101,7 @@ class TeamStats(BaseModel):
     offensive: OffensiveStats
     defensive: DefensiveStats
     advanced: AdvancedStats
+    soccer: SoccerStats = SoccerStats()
 
 
 class StatisticsClient:
@@ -119,6 +140,7 @@ class StatisticsClient:
             offensive=parsed.stats.offensive,
             defensive=parsed.stats.defensive,
             advanced=parsed.stats.advanced,
+            soccer=parsed.stats.soccer,
         )
 
     async def is_healthy(self) -> bool:

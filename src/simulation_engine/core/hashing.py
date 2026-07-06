@@ -14,7 +14,7 @@ import json
 from dataclasses import asdict
 from typing import Any
 
-from simulation_engine.core.params import GameContext, TeamParams
+from simulation_engine.core.params import GameContext, SportParams
 
 ENGINE_VERSION = 1
 HASH_LENGTH = 12
@@ -32,8 +32,8 @@ def _canonicalize(value: Any) -> Any:
 
 def compute_parameters_hash(
     game_id: str,
-    home_params: TeamParams,
-    away_params: TeamParams,
+    home_params: SportParams,
+    away_params: SportParams,
     context: GameContext,
     config: dict[str, Any],
     plugin_label: str = "basketball",

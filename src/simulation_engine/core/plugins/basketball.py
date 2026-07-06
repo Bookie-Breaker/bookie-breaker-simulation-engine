@@ -31,7 +31,7 @@ import numpy.typing as npt
 
 from simulation_engine.core import league_averages as lg
 from simulation_engine.core.framework import GameResult, GameSimulator
-from simulation_engine.core.params import GameContext, TeamParams
+from simulation_engine.core.params import GameContext, SportParams, TeamParams
 
 _MAX_POINTS_PER_POSSESSION = 3
 _MAKE_PROB_FLOOR = 0.05
@@ -117,7 +117,9 @@ class BasketballSimulator(GameSimulator):
         self._game_pace: float = lg.NBA_LEAGUE_AVG_PACE
         self._ot_possessions: int = round(lg.NBA_LEAGUE_AVG_PACE * lg.NBA_OT_POSSESSION_FRACTION)
 
-    def set_parameters(self, home_params: TeamParams, away_params: TeamParams, context: GameContext) -> None:
+    def set_parameters(self, home_params: SportParams, away_params: SportParams, context: GameContext) -> None:
+        if not isinstance(home_params, TeamParams) or not isinstance(away_params, TeamParams):
+            raise TypeError("BasketballSimulator requires TeamParams for both teams")
         slow, fast = sorted((home_params.pace, away_params.pace))
         self._game_pace = (slow * 0.55 + fast * 0.45) * 0.7 + lg.NBA_LEAGUE_AVG_PACE * 0.3
         self._ot_possessions = max(1, round(self._game_pace * lg.NBA_OT_POSSESSION_FRACTION))

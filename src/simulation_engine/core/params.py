@@ -12,7 +12,16 @@ from simulation_engine.core import league_averages as lg
 
 
 @dataclass(frozen=True)
-class TeamParams:
+class SportParams:
+    """Marker base for per-sport simulator parameter dataclasses.
+
+    Shared plumbing (runner, hashing, PluginSpec) is typed against this base;
+    each plugin narrows to its own subclass inside ``set_parameters``.
+    """
+
+
+@dataclass(frozen=True)
+class TeamParams(SportParams):
     """Basketball simulation parameters for one team (percentages as fractions)."""
 
     team_id: str

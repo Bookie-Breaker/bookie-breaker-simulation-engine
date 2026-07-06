@@ -113,10 +113,12 @@ class TestPluginSpecs:
         assert spec.plugin_config == {}
 
     def test_unsupported_league_message_lists_supported(self) -> None:
+        # EPL/FIFA_WC moved to the supported list in Phase 6 Wave 1; NHL is
+        # still unsupported until the hockey wave.
         from simulation_engine.api.errors import UnprocessableError
 
-        with pytest.raises(UnprocessableError, match=r"not supported for simulation \(supported: NBA\)"):
-            get_plugin("EPL")
+        with pytest.raises(UnprocessableError, match=r"not supported for simulation \(supported: EPL, FIFA_WC, NBA\)"):
+            get_plugin("NHL")
 
     def test_shim_applies_request_plugin_config_over_defaults(self, make_team_params) -> None:
         sim = get_simulator("NBA", {"home_advantage": 6.0})
