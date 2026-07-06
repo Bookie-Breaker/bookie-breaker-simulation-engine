@@ -52,3 +52,31 @@ class TestPluginLabel:
         h, a = make_team_params("h"), make_team_params("a")
         base = compute_parameters_hash("g1", h, a, GameContext(), dict(CONFIG))
         assert base != compute_parameters_hash("g1", h, a, GameContext(), dict(CONFIG), plugin_label="soccer")
+
+
+class TestContextNoneStripping:
+    """Phase 6 Wave 2: None-valued context fields are stripped from the hash.
+
+    GameContext gained optional probable-starter fields; unset (None) fields
+    must not change hashes computed before the fields existed, while a set
+    field must (a starter announcement invalidates cached simulations).
+    """
+
+    def test_none_starters_preserve_pre_change_hash(self, make_team_params) -> None:
+        h, a = make_team_params("h"), make_team_params("a")
+        implicit = compute_parameters_hash("g1", h, a, GameContext(), dict(CONFIG))
+        explicit_none = compute_parameters_hash(
+            "g1", h, a, GameContext(home_starter_fip=None, away_starter_fip=None), dict(CONFIG)
+        )
+        assert implicit == TestPluginLabel.PRE_REFACTOR_NBA_HASH
+        assert explicit_none == TestPluginLabel.PRE_REFACTOR_NBA_HASH
+
+    def test_set_starter_changes_hash(self, make_team_params) -> None:
+        h, a = make_team_params("h"), make_team_params("a")
+        base = compute_parameters_hash("g1", h, a, GameContext(), dict(CONFIG))
+        home_set = compute_parameters_hash("g1", h, a, GameContext(home_starter_fip=3.5), dict(CONFIG))
+        away_set = compute_parameters_hash("g1", h, a, GameContext(away_starter_fip=3.5), dict(CONFIG))
+        both_set = compute_parameters_hash(
+            "g1", h, a, GameContext(home_starter_fip=3.5, away_starter_fip=3.5), dict(CONFIG)
+        )
+        assert len({base, home_set, away_set, both_set}) == 4

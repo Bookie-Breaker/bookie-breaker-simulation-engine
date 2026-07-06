@@ -8,12 +8,16 @@ from simulation_engine.clients.statistics import TeamStats
 from simulation_engine.core import league_averages as lg
 from simulation_engine.core.framework import GameSimulator
 from simulation_engine.core.params import SportParams, map_team_stats
+from simulation_engine.core.plugins.baseball import BaseballSimulator, map_baseball_stats
 from simulation_engine.core.plugins.basketball import BasketballSimulator
 from simulation_engine.core.plugins.soccer import SoccerSimulator, map_soccer_stats
 from simulation_engine.core.runner import BASKETBALL_GRID_CONFIG, GridConfig
 
 #: Soccer's narrow line grids — goals, not points (components/simulation-engine.md).
 SOCCER_GRID_CONFIG = GridConfig(spread_radius=3, total_radius=4)
+
+#: Baseball line grids — the run line +/-1.5 dominates spreads; totals span wider.
+BASEBALL_GRID_CONFIG = GridConfig(spread_radius=4, total_radius=6)
 
 
 @dataclass(frozen=True)
@@ -70,6 +74,22 @@ _PLUGINS: dict[str, PluginSpec] = {
             "home_goal_multiplier": lg.SOCCER_EPL_HOME_GOAL_MULTIPLIER,
             "dc_rho": lg.SOCCER_DC_RHO,
         },
+    ),
+    # One baseball simulator serves MLB and NCAA_BSB (Phase 6 Wave 2);
+    # college baseball differs only by its higher league scoring rate.
+    "MLB": PluginSpec(
+        label="baseball",
+        simulator=BaseballSimulator,
+        map_team_stats=map_baseball_stats,
+        grid_config=BASEBALL_GRID_CONFIG,
+        plugin_config={"league_runs_per_game": lg.MLB_RUNS_PER_GAME},
+    ),
+    "NCAA_BSB": PluginSpec(
+        label="baseball",
+        simulator=BaseballSimulator,
+        map_team_stats=map_baseball_stats,
+        grid_config=BASEBALL_GRID_CONFIG,
+        plugin_config={"league_runs_per_game": lg.NCAA_BSB_RUNS_PER_GAME},
     ),
 }
 

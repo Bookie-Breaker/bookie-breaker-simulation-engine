@@ -26,7 +26,7 @@ from simulation_engine.api.models import (
     SimulationRunData,
 )
 from simulation_engine.cache.redis_cache import SimulationCache
-from simulation_engine.clients.statistics import StatisticsClient
+from simulation_engine.clients.statistics import ProbablePitcher, StatisticsClient
 from simulation_engine.config import Settings
 from simulation_engine.core.hashing import compute_parameters_hash
 from simulation_engine.core.output import build_distributions, build_result
@@ -40,6 +40,13 @@ _TERMINAL_GAME_STATUSES = frozenset({"FINAL", "CANCELLED"})
 
 def _utc_now_iso() -> str:
     return datetime.now(tz=UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _starter_fip(pitcher: ProbablePitcher | None) -> float | None:
+    """FIP of an announced probable starter; None when unannounced or FIP is missing."""
+    if pitcher is None or pitcher.fip <= 0:
+        return None
+    return pitcher.fip
 
 
 def _request_body_hash(game_id: str, config: SimulationConfigIn, force_refresh: bool) -> str:
@@ -97,7 +104,15 @@ class SimulationService:
         )
         home_params = spec.map_team_stats(home_stats)
         away_params = spec.map_team_stats(away_stats)
-        context = GameContext(league=game.league)
+        # Probable starters (BASEBALL leagues) enter the context — and thus
+        # the parameters hash — so a starter announcement invalidates cached
+        # simulations. The baseball plugin applies each starter to the
+        # OPPOSING batting side (home batters face the away starter).
+        context = GameContext(
+            league=game.league,
+            home_starter_fip=_starter_fip(game.home_probable_pitcher),
+            away_starter_fip=_starter_fip(game.away_probable_pitcher),
+        )
         config_dict = config.model_dump(mode="json")
         parameters_hash = compute_parameters_hash(
             game_id, home_params, away_params, context, config_dict, plugin_label=spec.label

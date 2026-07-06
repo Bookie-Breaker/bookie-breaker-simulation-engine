@@ -43,7 +43,11 @@ def compute_parameters_hash(
             "game_id": game_id,
             "home_params": asdict(home_params),
             "away_params": asdict(away_params),
-            "context": asdict(context),
+            # None-valued context fields (e.g. unannounced probable starters)
+            # are stripped so hashes computed before a field existed stay
+            # byte-identical; setting a field changes the hash and invalidates
+            # cached simulations, which is the desired behavior.
+            "context": {k: v for k, v in asdict(context).items() if v is not None},
             "config": config,
             "engine": {"plugin": plugin_label, "version": ENGINE_VERSION},
         }
