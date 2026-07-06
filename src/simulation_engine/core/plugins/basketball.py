@@ -99,24 +99,44 @@ def _calibrated_model(offense: TeamParams, defense: TeamParams, target_ppp: floa
     return _PossessionModel(pmf=pmf, cdf=np.cumsum(pmf))
 
 
+def _config_float(config: dict[str, object], key: str, default: float) -> float:
+    value = config.get(key, default)
+    return float(value) if isinstance(value, int | float) else default
+
+
 class BasketballSimulator(GameSimulator):
-    """Possession-based NBA simulator with a vectorized batch path."""
+    """Possession-based basketball simulator with a vectorized batch path.
+
+    League behavior is config-driven (Phase 6 Wave 5): NBA runs on the
+    defaults below and NCAA_BB passes college pace, variance, home advantage,
+    possession clip bounds, and overtime fraction via plugin config. The NBA
+    defaults reproduce the pre-Wave-5 hardcoded constants byte-for-byte.
+    """
 
     def __init__(self, plugin_config: dict[str, object] | None = None) -> None:
         config = plugin_config or {}
-        home_advantage = config.get("home_advantage", lg.NBA_HOME_ADVANTAGE)
-        self._home_advantage = float(home_advantage) if isinstance(home_advantage, int | float) else 1.5
+        self._home_advantage = _config_float(config, "home_advantage", lg.NBA_HOME_ADVANTAGE)
+        self._league_avg_pace = _config_float(config, "league_avg_pace", lg.NBA_LEAGUE_AVG_PACE)
+        self._possession_std = _config_float(config, "possession_std", lg.NBA_POSSESSION_STD)
+        self._possession_clip_min = _config_float(config, "possession_clip_min", 70)
+        self._possession_clip_max = _config_float(config, "possession_clip_max", 135)
+        self._ot_fraction = _config_float(config, "ot_possession_fraction", lg.NBA_OT_POSSESSION_FRACTION)
+        league = config.get("league")
+        self._league_override = league if isinstance(league, str) else None
+        self._league = self._league_override or "NBA"
         self._home_model: _PossessionModel | None = None
         self._away_model: _PossessionModel | None = None
-        self._game_pace: float = lg.NBA_LEAGUE_AVG_PACE
-        self._ot_possessions: int = round(lg.NBA_LEAGUE_AVG_PACE * lg.NBA_OT_POSSESSION_FRACTION)
+        self._game_pace: float = self._league_avg_pace
+        self._ot_possessions: int = round(self._league_avg_pace * self._ot_fraction)
 
     def set_parameters(self, home_params: SportParams, away_params: SportParams, context: GameContext) -> None:
         if not isinstance(home_params, TeamParams) or not isinstance(away_params, TeamParams):
             raise TypeError("BasketballSimulator requires TeamParams for both teams")
+        if self._league_override is None:
+            self._league = context.league
         slow, fast = sorted((home_params.pace, away_params.pace))
-        self._game_pace = (slow * 0.55 + fast * 0.45) * 0.7 + lg.NBA_LEAGUE_AVG_PACE * 0.3
-        self._ot_possessions = max(1, round(self._game_pace * lg.NBA_OT_POSSESSION_FRACTION))
+        self._game_pace = (slow * 0.55 + fast * 0.45) * 0.7 + self._league_avg_pace * 0.3
+        self._ot_possessions = max(1, round(self._game_pace * self._ot_fraction))
 
         hca = 0.0 if context.neutral_site else self._home_advantage
         home_target = ((home_params.off_rating + away_params.def_rating) / 2.0 + hca / 2.0) / 100.0
@@ -142,12 +162,19 @@ class BasketballSimulator(GameSimulator):
         mask = np.arange(max_poss)[np.newaxis, :] < possessions[:, np.newaxis]
         return np.asarray((points * mask).sum(axis=1), dtype=np.int32)
 
+    def _draw_possessions(self, rng: np.random.Generator, n: int) -> npt.NDArray[np.int64]:
+        """Per-game possession counts: Normal(pace, std) rounded and clipped to league bounds."""
+        possessions = np.clip(
+            np.rint(rng.normal(self._game_pace, self._possession_std, size=n)),
+            self._possession_clip_min,
+            self._possession_clip_max,
+        )
+        return possessions.astype(np.int64)
+
     def simulate_games(self, rng: np.random.Generator, n: int) -> tuple[npt.NDArray[np.int32], npt.NDArray[np.int32]]:
         home_model, away_model = self._models()
 
-        possessions = np.clip(np.rint(rng.normal(self._game_pace, lg.NBA_POSSESSION_STD, size=n)), 70, 135).astype(
-            np.int64
-        )
+        possessions = self._draw_possessions(rng, n)
         home_scores = self._sample_scores(rng, home_model.cdf, possessions)
         away_scores = self._sample_scores(rng, away_model.cdf, possessions)
 
@@ -170,4 +197,4 @@ class BasketballSimulator(GameSimulator):
         return "BASKETBALL"
 
     def get_league(self) -> str:
-        return "NBA"
+        return self._league
