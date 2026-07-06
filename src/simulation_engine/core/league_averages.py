@@ -29,3 +29,12 @@ SOCCER_WC_BASE_GOALS_PER_TEAM = 1.35  # World Cup goals per team per match
 SOCCER_EPL_BASE_GOALS_PER_TEAM = 1.45  # EPL goals per team per match
 SOCCER_EPL_HOME_GOAL_MULTIPLIER = 1.15  # club home advantage on the home goal rate
 SOCCER_DC_RHO = -0.11  # Dixon-Coles low-score dependence parameter
+
+# Baseball (Phase 6 Wave 2). Documented-tunable priors for the half-inning
+# runs plugin; validated against real data in the verification session.
+MLB_RUNS_PER_GAME = 4.5  # league runs per team per game
+NCAA_BSB_RUNS_PER_GAME = 6.5  # college baseball scores higher (dormant league)
+MLB_LEAGUE_FIP = 4.10  # league-average FIP, starter multiplier baseline
+MLB_LEAGUE_ERA = 4.20  # league-average ERA, bullpen multiplier baseline
+BASEBALL_P0_BASE = 0.73  # scoreless half-inning probability at a league-average scoring rate
+BASEBALL_P0_ALPHA = 0.35  # zero-inflation slope vs the target scoring rate (see plugins/baseball.py)

@@ -30,6 +30,7 @@ import numpy as np
 import numpy.typing as npt
 
 from simulation_engine.core import league_averages as lg
+from simulation_engine.core.calibrate import calibrate_distribution
 from simulation_engine.core.framework import GameResult, GameSimulator
 from simulation_engine.core.params import GameContext, SportParams, TeamParams
 
@@ -90,18 +91,11 @@ def _build_possession_pmf(offense: TeamParams, defense: TeamParams, make_scale: 
 
 def _calibrated_model(offense: TeamParams, defense: TeamParams, target_ppp: float) -> _PossessionModel:
     """Bisect the make-probability scale so expected points/possession hits the target."""
-    low, high = 0.5, 1.6
-    pmf = _build_possession_pmf(offense, defense)
-    for _ in range(40):
-        mid = (low + high) / 2
-        pmf = _build_possession_pmf(offense, defense, make_scale=mid)
-        expected = float(np.dot(pmf, np.arange(len(pmf))))
-        if abs(expected - target_ppp) < 1e-5:
-            break
-        if expected < target_ppp:
-            low = mid
-        else:
-            high = mid
+    pmf = calibrate_distribution(
+        lambda scale: _build_possession_pmf(offense, defense, make_scale=scale),
+        target_ppp,
+        (0.5, 1.6),
+    )
     return _PossessionModel(pmf=pmf, cdf=np.cumsum(pmf))
 
 

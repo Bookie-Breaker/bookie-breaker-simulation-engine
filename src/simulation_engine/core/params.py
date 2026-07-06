@@ -49,6 +49,13 @@ class GameContext:
 
     league: str = "NBA"
     neutral_site: bool = False
+    # Probable starting pitchers (Phase 6 Wave 2, BASEBALL leagues only). FIP
+    # is the only starter input the baseball plugin's multiplier needs; None
+    # means unannounced. None-valued fields are stripped from the parameter
+    # hash (core/hashing.py) so pre-baseball hashes stay byte-identical, and a
+    # starter announcement naturally invalidates cached simulations.
+    home_starter_fip: float | None = None
+    away_starter_fip: float | None = None
 
 
 def _derive_two_pct(fg_pct: float, three_pct: float, three_attempt_rate: float) -> float:

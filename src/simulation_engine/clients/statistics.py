@@ -14,6 +14,22 @@ class TeamRef(BaseModel):
     abbreviation: str = ""
 
 
+class ProbablePitcher(BaseModel):
+    """Probable starting pitcher for a game (BASEBALL leagues; present once
+    announced, absent otherwise). Season pitching stats are embedded in the
+    statistics-service payload so no extra lookup is needed."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    name: str = ""
+    external_id: str = ""
+    throws: str = ""  # throwing hand, L or R
+    era: float = 0.0
+    fip: float = 0.0
+    k_bb_pct: float = 0.0  # strikeout rate minus walk rate
+    innings_pitched: float = 0.0
+
+
 class Game(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -23,6 +39,8 @@ class Game(BaseModel):
     home_team: TeamRef
     away_team: TeamRef
     scheduled_start: str = ""
+    home_probable_pitcher: ProbablePitcher | None = None
+    away_probable_pitcher: ProbablePitcher | None = None
 
 
 class OffensiveStats(BaseModel):
@@ -75,6 +93,27 @@ class SoccerStats(BaseModel):
     form_points_last5: int = 0
 
 
+class BaseballStats(BaseModel):
+    """Baseball-specific stat block (BASEBALL-sport leagues only; ADR-026).
+
+    FIP and wOBA are computed in-service from official counting stats using
+    published seasonal constants.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    runs_scored_per_game: float = 0.0
+    runs_allowed_per_game: float = 0.0
+    team_woba: float = 0.0
+    team_obp: float = 0.0
+    team_slg: float = 0.0
+    batting_strikeout_pct: float = 0.0
+    batting_walk_pct: float = 0.0
+    team_era: float = 0.0
+    team_fip: float = 0.0
+    bullpen_era: float = 0.0
+
+
 class StatBlocks(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -82,6 +121,7 @@ class StatBlocks(BaseModel):
     defensive: DefensiveStats = DefensiveStats()
     advanced: AdvancedStats = AdvancedStats()
     soccer: SoccerStats = SoccerStats()
+    baseball: BaseballStats = BaseballStats()
 
 
 class TeamStatsResponse(BaseModel):
@@ -102,6 +142,7 @@ class TeamStats(BaseModel):
     defensive: DefensiveStats
     advanced: AdvancedStats
     soccer: SoccerStats = SoccerStats()
+    baseball: BaseballStats = BaseballStats()
 
 
 class StatisticsClient:
@@ -141,6 +182,7 @@ class StatisticsClient:
             defensive=parsed.stats.defensive,
             advanced=parsed.stats.advanced,
             soccer=parsed.stats.soccer,
+            baseball=parsed.stats.baseball,
         )
 
     async def is_healthy(self) -> bool:
