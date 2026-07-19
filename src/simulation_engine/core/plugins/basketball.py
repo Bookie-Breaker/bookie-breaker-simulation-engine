@@ -22,6 +22,15 @@ Deliberate deviations from the doc's pseudocode, documented for review:
 - Foul-accumulation/bonus state and the game clock are not modeled (the doc
   lists both among its simplifying approximations); pace variance is drawn
   per game instead.
+
+Live re-simulation (Phase 7 Wave 2): with ``context.live_state`` set, each
+iteration draws its full-game possession count as usual and then simulates
+only ``round(possessions x fraction_remaining)`` possessions, adding the
+current score as a constant offset. Per-possession efficiency models are
+unchanged (documented approximation: no live rate adjustment, and the pregame
+home-court advantage persists for the remainder). Overtime resolution is
+unchanged and applies when the COMBINED score is tied. The pregame path
+(live_state=None) is bit-identical to pre-Wave-2 behavior.
 """
 
 from dataclasses import dataclass
@@ -128,6 +137,9 @@ class BasketballSimulator(GameSimulator):
         self._away_model: _PossessionModel | None = None
         self._game_pace: float = self._league_avg_pace
         self._ot_possessions: int = round(self._league_avg_pace * self._ot_fraction)
+        self._live_fraction: float | None = None
+        self._offset_home = 0
+        self._offset_away = 0
 
     def set_parameters(self, home_params: SportParams, away_params: SportParams, context: GameContext) -> None:
         if not isinstance(home_params, TeamParams) or not isinstance(away_params, TeamParams):
@@ -143,6 +155,16 @@ class BasketballSimulator(GameSimulator):
         away_target = ((away_params.off_rating + home_params.def_rating) / 2.0 - hca / 2.0) / 100.0
         self._home_model = _calibrated_model(home_params, away_params, home_target)
         self._away_model = _calibrated_model(away_params, home_params, away_target)
+
+        live = context.live_state
+        if live is not None:
+            self._live_fraction = live.fraction_remaining
+            self._offset_home = live.home_score
+            self._offset_away = live.away_score
+        else:
+            self._live_fraction = None
+            self._offset_home = 0
+            self._offset_away = 0
 
     def _models(self) -> tuple[_PossessionModel, _PossessionModel]:
         if self._home_model is None or self._away_model is None:
@@ -175,8 +197,17 @@ class BasketballSimulator(GameSimulator):
         home_model, away_model = self._models()
 
         possessions = self._draw_possessions(rng, n)
+        if self._live_fraction is not None:
+            # Live runs simulate only the remaining possessions of each drawn
+            # full game; the pace draw itself is unchanged so pace variance
+            # shrinks proportionally with the remaining fraction.
+            possessions = np.rint(possessions * self._live_fraction).astype(np.int64)
         home_scores = self._sample_scores(rng, home_model.cdf, possessions)
         away_scores = self._sample_scores(rng, away_model.cdf, possessions)
+        # Live runs: final = current score + remainder; the OT check below
+        # then operates on combined scores. Zero offsets pregame are no-ops.
+        home_scores = home_scores + np.int32(self._offset_home)
+        away_scores = away_scores + np.int32(self._offset_away)
 
         # Overtime: resimulate ~5-minute mini-games for tied rows until decided.
         tied = home_scores == away_scores

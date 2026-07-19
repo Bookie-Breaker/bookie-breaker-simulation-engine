@@ -30,6 +30,20 @@ def _canonicalize(value: Any) -> Any:
     return value
 
 
+def _strip_none_fields(value: Any) -> Any:
+    """Recursively drop None-valued dict entries (context canonicalization).
+
+    Applied to the context only: an optional field that is unset must hash
+    exactly like a context from before the field existed, at every nesting
+    level — a LiveState with unset sport-specific fields (asdict turns the
+    nested dataclass into a dict) canonicalizes to the same digest as one
+    that never mentions them.
+    """
+    if isinstance(value, dict):
+        return {k: _strip_none_fields(v) for k, v in value.items() if v is not None}
+    return value
+
+
 def compute_parameters_hash(
     game_id: str,
     home_params: SportParams,
@@ -43,11 +57,12 @@ def compute_parameters_hash(
             "game_id": game_id,
             "home_params": asdict(home_params),
             "away_params": asdict(away_params),
-            # None-valued context fields (e.g. unannounced probable starters)
-            # are stripped so hashes computed before a field existed stay
+            # None-valued context fields (e.g. unannounced probable starters,
+            # pregame live_state, unset LiveState refinements) are stripped
+            # recursively so hashes computed before a field existed stay
             # byte-identical; setting a field changes the hash and invalidates
             # cached simulations, which is the desired behavior.
-            "context": {k: v for k, v in asdict(context).items() if v is not None},
+            "context": _strip_none_fields(asdict(context)),
             "config": config,
             "engine": {"plugin": plugin_label, "version": ENGINE_VERSION},
         }

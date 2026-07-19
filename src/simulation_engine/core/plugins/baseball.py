@@ -42,6 +42,30 @@ Documented approximations: walk-off innings are not truncated mid-inning
 (home 9th/extra-inning runs count in full), no extra-innings ghost runner,
 park factors are out of scope (no venue mapping source), and home advantage
 enters only through the bats-last structure.
+
+Live re-simulation (Phase 7 Wave 2): with ``context.live_state`` set, the
+game resumes from the given state and the current score is a constant offset.
+
+- **Explicit state** (``period`` = inning number AND ``half`` given): the
+  in-progress half-inning is drawn from a PMF recalibrated to
+  ``phase_target x RE[bases][outs] / RE[empty][0 out]`` using a static
+  run-expectancy matrix (``_RUN_EXPECTANCY``, standard MLB values rounded to
+  two decimals; missing ``bases``/``outs`` default to empty/0, i.e. no
+  adjustment). Subsequent half-innings use the normal per-inning
+  starter/bullpen distributions (absolute inning number decides the phase,
+  so a 7th-inning resume faces the bullpen). The bottom of the LAST
+  scheduled inning is zeroed where the home side already leads — including
+  a bottom-9 resume where the given state says home leads, which is treated
+  as already decided. A ``period`` past 9 resumes mid-extras: the current
+  inning is completed, then the ordinary extras loop runs on ties.
+- **Coarse state** (no ``period``/``half``): remaining full innings =
+  ``round(9 x fraction_remaining)``, resumed from the top of inning
+  ``10 - remaining`` with no partial-inning adjustment (``bases``/``outs``
+  are ignored without an inning to anchor them).
+
+Extras, the no-walk-off-truncation approximation, and the safety cap are
+unchanged. The pregame path (live_state=None) is bit-identical to
+pre-Wave-2 behavior.
 """
 
 from dataclasses import dataclass
@@ -53,7 +77,7 @@ from simulation_engine.clients.statistics import TeamStats
 from simulation_engine.core import league_averages as lg
 from simulation_engine.core.calibrate import calibrate_distribution
 from simulation_engine.core.framework import GameResult, GameSimulator
-from simulation_engine.core.params import GameContext, SportParams
+from simulation_engine.core.params import GameContext, LiveState, SportParams
 
 _MAX_RUNS_PER_HALF_INNING = 10
 _SUPPORT = _MAX_RUNS_PER_HALF_INNING + 1
@@ -65,6 +89,24 @@ _TARGET_MEAN_MIN, _TARGET_MEAN_MAX = 0.2, 1.2  # runs per half-inning
 _STARTER_MULT_MIN, _STARTER_MULT_MAX = 0.6, 1.6
 _BULLPEN_MULT_MIN, _BULLPEN_MULT_MAX = 0.7, 1.5
 _Q_BOUNDS = (1e-6, 0.98)
+
+#: Static run-expectancy matrix for the partial-inning live resume: expected
+#: runs scored in the REMAINDER of a half-inning from each (bases, outs)
+#: state. Standard MLB run-expectancy values (2010s-era averages, rounded to
+#: two decimals); rows are the 3-char base-occupancy strings used by
+#: ``LiveState.bases``, columns are outs 0/1/2. Only the RATIO to the fresh
+#: state ``("---", 0)`` enters the model, so era-to-era drift washes out.
+_RUN_EXPECTANCY: dict[str, tuple[float, float, float]] = {
+    "---": (0.51, 0.27, 0.11),
+    "1--": (0.90, 0.55, 0.23),
+    "-2-": (1.10, 0.68, 0.32),
+    "--3": (1.35, 0.95, 0.35),
+    "12-": (1.44, 0.93, 0.44),
+    "1-3": (1.78, 1.13, 0.48),
+    "-23": (1.96, 1.41, 0.56),
+    "123": (2.29, 1.54, 0.75),
+}
+_FRESH_HALF_INNING_RE = _RUN_EXPECTANCY["---"][0]
 
 
 @dataclass(frozen=True)
@@ -143,15 +185,43 @@ def _half_inning_pmf(target_mean: float, league_mean: float) -> npt.NDArray[np.f
 
 @dataclass(frozen=True)
 class _BattingModel:
-    """Precomputed half-inning distributions for one batting team."""
+    """Precomputed half-inning distributions for one batting team.
+
+    ``starter_target`` / ``bullpen_target`` are the raw (pre-clamp) expected
+    runs per half-inning behind each PMF, kept so the live resume can
+    recalibrate a partial-inning PMF from the same target.
+    """
 
     starter_pmf: npt.NDArray[np.float64]
     starter_cdf: npt.NDArray[np.float64]
     bullpen_pmf: npt.NDArray[np.float64]
     bullpen_cdf: npt.NDArray[np.float64]
+    starter_target: float
+    bullpen_target: float
 
     def cdf_for_inning(self, inning: int) -> npt.NDArray[np.float64]:
         return self.starter_cdf if inning <= _STARTER_INNINGS else self.bullpen_cdf
+
+    def target_for_inning(self, inning: int) -> float:
+        return self.starter_target if inning <= _STARTER_INNINGS else self.bullpen_target
+
+
+@dataclass(frozen=True)
+class _LivePlan:
+    """Resolved live-resume plan built from a LiveState in set_parameters.
+
+    ``start_inning``/``resume_half`` locate the first simulated half-inning;
+    ``partial_cdf`` (explicit-state resumes only) is the recalibrated CDF for
+    that in-progress half; ``last_scheduled_inning`` is 9, or the current
+    inning when resuming mid-extras.
+    """
+
+    offset_home: int
+    offset_away: int
+    start_inning: int
+    resume_half: str  # "TOP" or "BOTTOM"
+    partial_cdf: npt.NDArray[np.float64] | None
+    last_scheduled_inning: int
 
 
 def _config_float(config: dict[str, object], key: str, default: float) -> float:
@@ -172,6 +242,7 @@ class BaseballSimulator(GameSimulator):
         self._league = self._league_override or "MLB"
         self._home_batting: _BattingModel | None = None
         self._away_batting: _BattingModel | None = None
+        self._live_plan: _LivePlan | None = None
         # Diagnostics from the most recent simulate_games call.
         self._last_extra_inning_games = 0
         self._last_forced_tiebreaks = 0
@@ -192,13 +263,17 @@ class BaseballSimulator(GameSimulator):
     ) -> _BattingModel:
         base = (batting.runs_scored_per_game * opponent.runs_allowed_per_game / self._league_runs_per_game) / 9.0
         league_mean = self._league_runs_per_game / 9.0
-        starter_pmf = _half_inning_pmf(base * self._starter_multiplier(opp_starter_fip), league_mean)
-        bullpen_pmf = _half_inning_pmf(base * self._bullpen_multiplier(opponent), league_mean)
+        starter_target = base * self._starter_multiplier(opp_starter_fip)
+        bullpen_target = base * self._bullpen_multiplier(opponent)
+        starter_pmf = _half_inning_pmf(starter_target, league_mean)
+        bullpen_pmf = _half_inning_pmf(bullpen_target, league_mean)
         return _BattingModel(
             starter_pmf=starter_pmf,
             starter_cdf=np.cumsum(starter_pmf),
             bullpen_pmf=bullpen_pmf,
             bullpen_cdf=np.cumsum(bullpen_pmf),
+            starter_target=starter_target,
+            bullpen_target=bullpen_target,
         )
 
     def set_parameters(self, home_params: SportParams, away_params: SportParams, context: GameContext) -> None:
@@ -210,6 +285,42 @@ class BaseballSimulator(GameSimulator):
         # see the away starter/bullpen and vice versa.
         self._home_batting = self._batting_model(home_params, away_params, context.away_starter_fip)
         self._away_batting = self._batting_model(away_params, home_params, context.home_starter_fip)
+        self._live_plan = self._build_live_plan(context.live_state)
+
+    def _build_live_plan(self, live: LiveState | None) -> _LivePlan | None:
+        """Resolve a LiveState into a resume plan (see module docstring).
+
+        Explicit state (period AND half) resumes mid-inning with the
+        run-expectancy partial adjustment; otherwise the coarse mode maps
+        ``fraction_remaining`` to a whole number of remaining innings.
+        """
+        if live is None:
+            return None
+        if live.period is not None and live.half is not None:
+            inning = live.period
+            batting = self._away_batting if live.half == "TOP" else self._home_batting
+            assert batting is not None
+            bases = live.bases if live.bases is not None else "---"
+            outs = live.outs if live.outs is not None else 0
+            ratio = _RUN_EXPECTANCY[bases][outs] / _FRESH_HALF_INNING_RE
+            partial_pmf = _half_inning_pmf(batting.target_for_inning(inning) * ratio, self._league_runs_per_game / 9.0)
+            return _LivePlan(
+                offset_home=live.home_score,
+                offset_away=live.away_score,
+                start_inning=inning,
+                resume_half=live.half,
+                partial_cdf=np.cumsum(partial_pmf),
+                last_scheduled_inning=max(_REGULATION_INNINGS, inning),
+            )
+        remaining = int(np.clip(round(_REGULATION_INNINGS * live.fraction_remaining), 0, _REGULATION_INNINGS))
+        return _LivePlan(
+            offset_home=live.home_score,
+            offset_away=live.away_score,
+            start_inning=_REGULATION_INNINGS - remaining + 1,
+            resume_half="TOP",
+            partial_cdf=None,
+            last_scheduled_inning=_REGULATION_INNINGS,
+        )
 
     def _models(self) -> tuple[_BattingModel, _BattingModel]:
         if self._home_batting is None or self._away_batting is None:
@@ -241,11 +352,52 @@ class BaseballSimulator(GameSimulator):
         home_by_inning[home_leads_after_eight_and_a_half, -1] = 0
         return home_by_inning, away_by_inning
 
+    def _simulate_live_regulation(
+        self, rng: np.random.Generator, n: int
+    ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64]]:
+        """Resume regulation from the live plan; returns cumulative scores incl. offsets.
+
+        Half-innings are drawn in game order from the resume point. The
+        in-progress half (explicit resumes) uses the run-expectancy-adjusted
+        partial CDF; the bottom of the last scheduled inning is zeroed where
+        the home side already leads (the pregame bottom-9 rule, applied to
+        cumulative scores including the live offsets).
+        """
+        home, away = self._models()
+        plan = self._live_plan
+        assert plan is not None
+        home_scores = np.full(n, plan.offset_home, dtype=np.int64)
+        away_scores = np.full(n, plan.offset_away, dtype=np.int64)
+        for inning in range(plan.start_inning, plan.last_scheduled_inning + 1):
+            resuming = inning == plan.start_inning
+            if not (resuming and plan.resume_half == "BOTTOM"):
+                top_cdf = (
+                    plan.partial_cdf
+                    if resuming and plan.resume_half == "TOP" and plan.partial_cdf is not None
+                    else away.cdf_for_inning(inning)
+                )
+                away_scores += self._draw_half_inning(rng, top_cdf, n)
+            bottom_cdf = (
+                plan.partial_cdf
+                if resuming and plan.resume_half == "BOTTOM" and plan.partial_cdf is not None
+                else home.cdf_for_inning(inning)
+            )
+            bottom = self._draw_half_inning(rng, bottom_cdf, n)
+            if inning == plan.last_scheduled_inning:
+                bottom[home_scores > away_scores] = 0
+            home_scores += bottom
+        return home_scores, away_scores
+
     def simulate_games(self, rng: np.random.Generator, n: int) -> tuple[npt.NDArray[np.int32], npt.NDArray[np.int32]]:
         home, away = self._models()
-        home_by_inning, away_by_inning = self._simulate_regulation(rng, n)
-        home_scores = home_by_inning.sum(axis=1)
-        away_scores = away_by_inning.sum(axis=1)
+        if self._live_plan is None:
+            home_by_inning, away_by_inning = self._simulate_regulation(rng, n)
+            home_scores = home_by_inning.sum(axis=1)
+            away_scores = away_by_inning.sum(axis=1)
+            last_scheduled = _REGULATION_INNINGS
+        else:
+            home_scores, away_scores = self._simulate_live_regulation(rng, n)
+            last_scheduled = self._live_plan.last_scheduled_inning
 
         # Extra innings: full innings at bullpen-phase rates for the tied
         # subset until every game is decided (no draws, no walk-off
@@ -253,7 +405,7 @@ class BaseballSimulator(GameSimulator):
         tied = home_scores == away_scores
         self._last_extra_inning_games = int(tied.sum())
         self._last_forced_tiebreaks = 0
-        inning = _REGULATION_INNINGS
+        inning = last_scheduled
         while bool(tied.any()):
             inning += 1
             indices = np.flatnonzero(tied)

@@ -44,6 +44,46 @@ class TeamParams(SportParams):
 
 
 @dataclass(frozen=True)
+class LiveState:
+    """Current in-game state for live re-simulation (Phase 7 Wave 2).
+
+    Plugins condition on this to simulate only the REMAINDER of the game and
+    add the current score as a constant offset. ``fraction_remaining`` is the
+    fraction of regulation game time still to be played, in (0, 1]. The
+    sport-specific fields are optional refinements:
+
+    - ``period`` / ``clock_seconds``: current period (quarter, inning, half,
+      ...) and seconds remaining on the game clock. Carried for hashing and
+      diagnostics by most plugins; baseball reads ``period`` as the inning
+      number for its explicit-state resume.
+    - ``bases`` / ``outs`` / ``half`` (baseball): base occupancy as a 3-char
+      string (position i = runner on base i+1, "-" when empty: "---", "1--",
+      "-2-", "--3", "12-", "1-3", "-23", "123"), outs in the current
+      half-inning (0-2), and "TOP"/"BOTTOM".
+    - ``possession`` / ``down`` / ``yardline`` (football): "HOME"/"AWAY" ball
+      possession, current down (1-4), and yards from the opponent goal line
+      (0-100). Only ``possession`` affects the drive-based model; down and
+      yardline are carried for hashing and future play-level models.
+
+    None-valued fields are stripped from the parameter hash (core/hashing.py)
+    just like optional GameContext fields, so every distinct live state gets
+    its own cache entry and omitted refinements do not fragment the cache.
+    """
+
+    home_score: int
+    away_score: int
+    fraction_remaining: float
+    period: int | None = None
+    clock_seconds: int | None = None
+    bases: str | None = None
+    outs: int | None = None
+    half: str | None = None
+    possession: str | None = None
+    down: int | None = None
+    yardline: int | None = None
+
+
+@dataclass(frozen=True)
 class GameContext:
     """Game-level context passed to plugins."""
 
@@ -56,6 +96,11 @@ class GameContext:
     # starter announcement naturally invalidates cached simulations.
     home_starter_fip: float | None = None
     away_starter_fip: float | None = None
+    # Live re-simulation state (Phase 7 Wave 2). None means pregame. Because
+    # None context fields are stripped from the parameter hash, pregame
+    # hashes stay byte-identical to pre-Wave-2 hashes and every distinct live
+    # state gets its own cache entry for free.
+    live_state: LiveState | None = None
 
 
 def _derive_two_pct(fg_pct: float, three_pct: float, three_attempt_rate: float) -> float:

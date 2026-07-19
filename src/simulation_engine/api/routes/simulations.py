@@ -34,13 +34,17 @@ async def create_simulation(
     """Run a Monte Carlo simulation for a game.
 
     Returns a cached result when an identical parameters_hash exists and
-    force_refresh is false.
+    force_refresh is false. With ``live_state`` (Phase 7 Wave 2) the run
+    simulates the remainder of the game from the given in-game state; live
+    runs get their own parameters_hash, so they never collide with pregame
+    cache entries.
     """
     run = await service.run_simulation(
         request.game_id,
         request.config,
         force_refresh=request.force_refresh,
         idempotency_key=x_idempotency_key,
+        live_state=request.live_state,
     )
     return envelope(run)
 

@@ -11,6 +11,14 @@ No overtime or tie-break is simulated: draws are valid outcomes and scores are
 regulation (90-minute) scores, which is what all Phase 6 soccer markets settle
 on (ADR-027). One simulator serves every SOCCER league; competitions differ
 only by plugin config (FIFA_WC vs EPL base rates and home multiplier).
+
+Live re-simulation (Phase 7 Wave 2): with ``context.live_state`` set, the
+pregame goal rates are scaled by ``fraction_remaining`` (a homogeneous-Poisson
+approximation — scoring intensity is assumed uniform over the match, and the
+Dixon-Coles correction is reapplied to the remainder grid's low-score cells),
+the goal grid is rebuilt for the remaining match only, and the current score
+is added as a constant offset to every sampled final score. The pregame path
+(live_state=None) is bit-identical to pre-Wave-2 behavior.
 """
 
 from dataclasses import dataclass
@@ -93,6 +101,8 @@ class SoccerSimulator(GameSimulator):
         self._league = self._league_override or "FIFA_WC"
         self._lam_home = 0.0
         self._lam_away = 0.0
+        self._offset_home = 0
+        self._offset_away = 0
         self._grid: npt.NDArray[np.float64] | None = None
         self._cdf: npt.NDArray[np.float64] | None = None
 
@@ -109,6 +119,19 @@ class SoccerSimulator(GameSimulator):
         self._lam_away = float(
             np.clip(self._base_goals * away_params.attack * home_params.defense, _LAMBDA_MIN, _LAMBDA_MAX)
         )
+        live = context.live_state
+        if live is not None:
+            # Remainder-of-match rates: scale the clipped full-match lambdas
+            # by the fraction of the match remaining (uniform-intensity
+            # approximation). No re-clamping — a small remainder legitimately
+            # falls below the pregame lambda floor.
+            self._lam_home *= live.fraction_remaining
+            self._lam_away *= live.fraction_remaining
+            self._offset_home = live.home_score
+            self._offset_away = live.away_score
+        else:
+            self._offset_home = 0
+            self._offset_away = 0
         self._grid = _build_goal_grid(self._lam_home, self._lam_away, self._dc_rho)
         cdf = np.cumsum(self._grid.ravel())
         cdf[-1] = 1.0  # guard the inverse-CDF draw against float round-off
@@ -120,19 +143,30 @@ class SoccerSimulator(GameSimulator):
         return self._cdf
 
     def simulate_games(self, rng: np.random.Generator, n: int) -> tuple[npt.NDArray[np.int32], npt.NDArray[np.int32]]:
-        return sample_grid(rng, self._require_cdf(), _GRID_SIZE, n)
+        home, away = sample_grid(rng, self._require_cdf(), _GRID_SIZE, n)
+        # Live runs: final score = current score + sampled remainder. Adding
+        # zero offsets pregame leaves values (and the RNG stream) unchanged.
+        return home + np.int32(self._offset_home), away + np.int32(self._offset_away)
 
     def simulate_game(self, rng: np.random.Generator) -> GameResult:
         home, away = self.simulate_games(rng, 1)
         return GameResult(home_score=int(home[0]), away_score=int(away[0]), metadata={})
 
     def joint_grid(self) -> npt.NDArray[np.float64] | None:
-        """The 13x13 Dixon-Coles joint regulation-score PMF built by set_parameters.
+        """The Dixon-Coles joint regulation-score PMF built by set_parameters.
 
         Soccer settles on regulation scores (ADR-027), so this grid IS the
-        analytic joint distribution of the simulated outcomes.
+        analytic joint distribution of the simulated outcomes. For live runs
+        the remainder grid is shifted by the current score (zero-padded low
+        rows/columns) so it stays the joint PMF of FINAL scores.
         """
-        return self._grid
+        if self._grid is None:
+            return None
+        if self._offset_home == 0 and self._offset_away == 0:
+            return self._grid
+        shifted = np.zeros((_GRID_SIZE + self._offset_home, _GRID_SIZE + self._offset_away), dtype=np.float64)
+        shifted[self._offset_home :, self._offset_away :] = self._grid
+        return shifted
 
     def get_sport(self) -> str:
         return "SOCCER"

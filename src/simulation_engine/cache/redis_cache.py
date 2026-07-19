@@ -10,6 +10,14 @@ required because this service has no Postgres (proposed as a docs update):
 Distributions — and the ``sim:correlations:{game_id}`` parlay-correlation
 artifact (Phase 7 Wave 1) — are stored zlib-compressed then base64-encoded so
 a single ``decode_responses=True`` client can be used throughout.
+
+``sim:distributions:{game_id}`` and ``sim:correlations:{game_id}`` are
+game-scoped LATEST-RUN blobs by design: each stores the run id it belongs to,
+and the read path 404s when the requested run is no longer the latest. Live
+re-simulations (Phase 7 Wave 2) therefore overwrite a game's pregame blobs
+with latest-wins semantics — never a collision, because run reuse is keyed by
+``sim:result:{game_id}:{parameters_hash}`` and live runs carry a distinct
+parameters hash.
 """
 
 import base64

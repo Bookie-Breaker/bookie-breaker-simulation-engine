@@ -14,10 +14,40 @@ class SimulationConfigIn(BaseModel):
     plugin_config: dict[str, object] = Field(default_factory=dict)
 
 
+class LiveStateIn(BaseModel):
+    """Current game state for live re-simulation (Phase 7 Wave 2).
+
+    Simulates the remainder of the game and adds the current score as an
+    offset. Bounds (fraction_remaining in (0, 1], scores >= 0, sport-specific
+    refinements in their legal ranges) are enforced in the service layer as
+    422 UNPROCESSABLE_ENTITY per the Wave 2 contract — deliberately not as
+    pydantic Field constraints, which this service's RequestValidationError
+    handler would surface as 400 VALIDATION_ERROR instead.
+
+    Sport-specific optional fields: ``bases``/``outs``/``half`` (baseball;
+    bases is a 3-char occupancy string like "1-3", half is "TOP"/"BOTTOM",
+    period is the inning number), ``possession``/``down``/``yardline``
+    (football; possession is "HOME"/"AWAY").
+    """
+
+    home_score: int
+    away_score: int
+    fraction_remaining: float
+    period: int | None = None
+    clock_seconds: int | None = None
+    bases: str | None = None
+    outs: int | None = None
+    half: str | None = None
+    possession: str | None = None
+    down: int | None = None
+    yardline: int | None = None
+
+
 class SimulationRequest(BaseModel):
     game_id: str
     config: SimulationConfigIn = SimulationConfigIn()
     force_refresh: bool = False
+    live_state: LiveStateIn | None = None
 
 
 class SimulationConfigOut(BaseModel):
@@ -73,8 +103,11 @@ class SimulationRunData(BaseModel):
 
 
 class BatchGameRequest(BaseModel):
+    # live_state is accepted by the schema but rejected with 422 by the
+    # service: live re-simulation is single-game only in v1 (Phase 7 Wave 2).
     game_id: str
     config: SimulationConfigIn | None = None
+    live_state: LiveStateIn | None = None
 
 
 class BatchRequest(BaseModel):
