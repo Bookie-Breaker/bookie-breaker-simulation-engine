@@ -7,8 +7,9 @@ required because this service has no Postgres (proposed as a docs update):
 - ``sim:latest:{game_id}`` -- latest run id pointer for /games/{id}/latest
 - ``sim:batch:{batch_id}`` / ``sim:idempotency:{key}`` / daily load counter
 
-Distributions are stored zlib-compressed then base64-encoded so a single
-``decode_responses=True`` client can be used throughout.
+Distributions — and the ``sim:correlations:{game_id}`` parlay-correlation
+artifact (Phase 7 Wave 1) — are stored zlib-compressed then base64-encoded so
+a single ``decode_responses=True`` client can be used throughout.
 """
 
 import base64
@@ -54,7 +55,23 @@ class SimulationCache:
         decoded: dict[str, object] = json.loads(zlib.decompress(base64.b64decode(raw)))
         return decoded
 
-    async def store_run(self, run: SimulationRunData, distributions: Mapping[str, object]) -> None:
+    async def get_correlations(self, game_id: str) -> dict[str, object] | None:
+        raw = await self._redis.get(f"sim:correlations:{game_id}")
+        if raw is None:
+            return None
+        decoded: dict[str, object] = json.loads(zlib.decompress(base64.b64decode(raw)))
+        return decoded
+
+    @staticmethod
+    def _compress_blob(run_id: str, payload: Mapping[str, object]) -> str:
+        return base64.b64encode(zlib.compress(json.dumps({"simulation_run_id": run_id, **payload}).encode())).decode()
+
+    async def store_run(
+        self,
+        run: SimulationRunData,
+        distributions: Mapping[str, object],
+        correlations: Mapping[str, object],
+    ) -> None:
         """Persist all read paths for a completed run in one pipeline."""
         result_fields: dict[FieldT, EncodableT] = {
             "simulation_run_id": run.simulation_run_id,
@@ -70,9 +87,8 @@ class SimulationCache:
             "converged": int(run.converged),
             "completed_at": run.completed_at,
         }
-        distributions_blob = base64.b64encode(
-            zlib.compress(json.dumps({"simulation_run_id": run.simulation_run_id, **distributions}).encode())
-        ).decode()
+        distributions_blob = self._compress_blob(run.simulation_run_id, distributions)
+        correlations_blob = self._compress_blob(run.simulation_run_id, correlations)
 
         pipe = self._redis.pipeline(transaction=False)
         result_key = self._result_key(run.game_id, run.parameters_hash)
@@ -81,6 +97,7 @@ class SimulationCache:
         pipe.set(f"sim:run:{run.simulation_run_id}", run.model_dump_json(), ex=self._result_ttl)
         pipe.set(f"sim:latest:{run.game_id}", run.simulation_run_id, ex=self._result_ttl)
         pipe.set(f"sim:distributions:{run.game_id}", distributions_blob, ex=self._result_ttl)
+        pipe.set(f"sim:correlations:{run.game_id}", correlations_blob, ex=self._result_ttl)
         pipe.incr(self._daily_counter_key())
         pipe.expire(self._daily_counter_key(), 172_800)
         await pipe.execute()

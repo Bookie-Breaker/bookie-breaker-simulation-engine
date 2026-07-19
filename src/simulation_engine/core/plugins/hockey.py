@@ -181,6 +181,15 @@ class HockeySimulator(GameSimulator):
         home, away = self.simulate_games(rng, 1)
         return GameResult(home_score=int(home[0]), away_score=int(away[0]), metadata={})
 
+    def joint_grid(self) -> npt.NDArray[np.float64] | None:
+        """The 10x10 Dixon-Coles joint REGULATION-score PMF built by set_parameters.
+
+        Hockey final scores add +1 to the OT/shootout winner, so this grid is
+        the pre-resolution (60-minute) joint distribution — the right object
+        for regulation-time three-way markets, not for final-score legs.
+        """
+        return self._grid
+
     def get_sport(self) -> str:
         return "HOCKEY"
 

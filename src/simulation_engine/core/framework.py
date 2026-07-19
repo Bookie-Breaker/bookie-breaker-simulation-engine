@@ -57,6 +57,15 @@ class GameSimulator(ABC):
             away[i] = result.away_score
         return home, away
 
+    def joint_grid(self) -> npt.NDArray[np.float64] | None:
+        """Analytic joint score PMF (rows = home score, cols = away score) when the plugin has one.
+
+        Poisson-grid sports (soccer, hockey) return the grid built by
+        set_parameters; sports without an analytic joint return None (the
+        default). Callers must invoke set_parameters first.
+        """
+        return None
+
     @abstractmethod
     def get_sport(self) -> str:
         """Return sport identifier: 'FOOTBALL', 'BASKETBALL', 'BASEBALL', 'SOCCER', or 'HOCKEY'."""

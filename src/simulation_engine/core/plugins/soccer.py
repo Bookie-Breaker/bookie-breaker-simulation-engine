@@ -126,6 +126,14 @@ class SoccerSimulator(GameSimulator):
         home, away = self.simulate_games(rng, 1)
         return GameResult(home_score=int(home[0]), away_score=int(away[0]), metadata={})
 
+    def joint_grid(self) -> npt.NDArray[np.float64] | None:
+        """The 13x13 Dixon-Coles joint regulation-score PMF built by set_parameters.
+
+        Soccer settles on regulation scores (ADR-027), so this grid IS the
+        analytic joint distribution of the simulated outcomes.
+        """
+        return self._grid
+
     def get_sport(self) -> str:
         return "SOCCER"
 

@@ -17,6 +17,7 @@ from simulation_engine.api.models import (
     BatchGameRequest,
     BatchGameResult,
     BatchResultSummary,
+    CorrelationsData,
     DistributionsData,
     DistributionType,
     HealthData,
@@ -28,6 +29,7 @@ from simulation_engine.api.models import (
 from simulation_engine.cache.redis_cache import SimulationCache
 from simulation_engine.clients.statistics import ProbablePitcher, StatisticsClient
 from simulation_engine.config import Settings
+from simulation_engine.core.correlations import CorrelationArtifact, UnknownLegError, build_correlation_artifact
 from simulation_engine.core.hashing import compute_parameters_hash
 from simulation_engine.core.output import build_distributions, build_result
 from simulation_engine.core.params import GameContext
@@ -170,7 +172,16 @@ class SimulationService:
         )
 
         distributions = {name: dist.model_dump(mode="json") for name, dist in build_distributions(output).items()}
-        await self._cache.store_run(run, distributions)
+        # The raw per-iteration sample arrays are not retained past this point,
+        # so the parlay-correlation artifact (including the packed boolean leg
+        # matrix that makes arbitrary-subset joints computable at read time)
+        # must be built here, from the in-memory output.
+        correlations = build_correlation_artifact(
+            output,
+            include_draw=simulator.get_sport() == "SOCCER",
+            joint_goal_grid=simulator.joint_grid(),
+        ).to_payload()
+        await self._cache.store_run(run, distributions, correlations)
         await publish_simulation_completed(self._redis, run, game.league)
         if idempotency_key is not None:
             await self._cache.store_idempotent(idempotency_key, body_hash, run.simulation_run_id)
@@ -204,6 +215,43 @@ class SimulationService:
                 "iterations_completed": run.iterations_completed,
                 "distributions": distributions,
             }
+        )
+
+    async def get_correlations(self, simulation_id: str, legs: list[str] | None = None) -> CorrelationsData:
+        """Correlation artifact for a run; with ``legs``, a subset view plus their joint probability.
+
+        Requested legs must be stored artifact legs or exact half-point
+        complements — the raw sample arrays are gone after the run, so legs
+        outside that vocabulary cannot be recomputed and yield a 422.
+        """
+        run = await self.get_run(simulation_id)
+        stored = await self._cache.get_correlations(run.game_id)
+        if stored is None or stored.get("simulation_run_id") != simulation_id:
+            raise NotFoundError(f"Correlations for simulation {simulation_id} are no longer available")
+        artifact = CorrelationArtifact.from_payload(stored)
+        if legs is None:
+            return CorrelationsData(
+                simulation_run_id=simulation_id,
+                game_id=run.game_id,
+                iterations=artifact.iterations,
+                legs=artifact.legs,
+                marginals=artifact.marginals,
+                matrix=artifact.matrix,
+                joint_goal_grid=artifact.joint_goal_grid,
+            )
+        try:
+            marginals, matrix, joint = artifact.subset(legs)
+        except UnknownLegError as exc:
+            raise UnprocessableError(str(exc)) from exc
+        return CorrelationsData(
+            simulation_run_id=simulation_id,
+            game_id=run.game_id,
+            iterations=artifact.iterations,
+            legs=legs,
+            marginals=marginals,
+            matrix=matrix,
+            joint_probability=joint,
+            joint_goal_grid=artifact.joint_goal_grid,
         )
 
     def default_config(self) -> SimulationConfigIn:

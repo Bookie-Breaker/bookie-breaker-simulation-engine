@@ -127,6 +127,30 @@ class DistributionsData(BaseModel):
     distributions: dict[str, Distribution]
 
 
+class CorrelationsData(BaseModel):
+    """Same-game parlay correlation artifact for one simulation run (Phase 7 Wave 1).
+
+    ``legs`` uses the canonical leg vocabulary (``MONEYLINE:HOME``,
+    ``SPREAD:HOME:-1.5``, ``TOTAL:OVER:2.5``, ...; lines rendered with %g).
+    ``matrix`` is the pairwise phi/Pearson correlation matrix aligned with
+    ``legs`` (unit diagonal; zero-variance legs correlate 0.0 with everything).
+    ``joint_probability`` is present only when specific legs were requested:
+    the empirical Monte Carlo probability that ALL requested legs hit in the
+    same iteration (pushes count as misses). ``joint_goal_grid`` is the
+    analytic joint score PMF (rows = home score) for Poisson-grid sports
+    (soccer regulation, hockey pre-OT regulation); null elsewhere.
+    """
+
+    simulation_run_id: str
+    game_id: str
+    iterations: int
+    legs: list[str]
+    marginals: dict[str, float]
+    matrix: list[list[float]]
+    joint_probability: float | None = None
+    joint_goal_grid: list[list[float]] | None = None
+
+
 class HealthLoad(BaseModel):
     active_simulations: int
     queued_simulations: int
