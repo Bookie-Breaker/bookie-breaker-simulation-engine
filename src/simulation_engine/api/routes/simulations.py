@@ -9,6 +9,7 @@ from simulation_engine.api.envelope import Envelope, envelope
 from simulation_engine.api.models import (
     BatchData,
     BatchRequest,
+    CorrelationsData,
     DistributionsData,
     DistributionType,
     SimulationRequest,
@@ -71,3 +72,31 @@ async def get_simulation_distributions(
 ) -> Envelope[DistributionsData]:
     """Get raw score/margin/total distributions for a simulation, suitable for visualization."""
     return envelope(await service.get_distributions(simulation_id, distribution_type))
+
+
+@router.get("/simulations/{simulation_id}/correlations", response_model=Envelope[CorrelationsData])
+async def get_simulation_correlations(
+    simulation_id: SimulationIdPath,
+    service: ServiceDep,
+    legs: Annotated[
+        str | None,
+        Query(
+            description=(
+                "Comma-separated canonical leg keys (e.g. "
+                "'MONEYLINE:HOME,TOTAL:OVER:2.5'). When given, the response is "
+                "restricted to those legs and includes their empirical joint "
+                "probability. Omit for the full default artifact."
+            ),
+        ),
+    ] = None,
+) -> Envelope[CorrelationsData]:
+    """Get the same-game parlay correlation artifact for a simulation run.
+
+    Returns leg marginals and the pairwise phi correlation matrix over the
+    canonical leg vocabulary; with ?legs= the empirical joint probability of
+    the requested leg set (the exact Monte Carlo joint, not a copula
+    approximation). Poisson-grid sports (soccer/hockey) also expose the
+    analytic joint goal grid.
+    """
+    leg_list = [part.strip() for part in legs.split(",") if part.strip()] if legs is not None else None
+    return envelope(await service.get_correlations(simulation_id, leg_list or None))
