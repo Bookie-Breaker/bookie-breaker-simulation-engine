@@ -1,5 +1,13 @@
 # bookie-breaker-simulation-engine
 
+[![CI](https://img.shields.io/github/actions/workflow/status/Bookie-Breaker/bookie-breaker-simulation-engine/ci.yml?branch=main&label=CI&logo=githubactions&logoColor=white)](https://github.com/Bookie-Breaker/bookie-breaker-simulation-engine/actions/workflows/ci.yml)
+[![coverage](https://img.shields.io/codecov/c/github/Bookie-Breaker/bookie-breaker-simulation-engine?logo=codecov&logoColor=white)](https://app.codecov.io/gh/Bookie-Breaker/bookie-breaker-simulation-engine)
+![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)
+![uv](https://img.shields.io/badge/uv-managed-DE5FE9?logo=uv&logoColor=white)
+![Redis](https://img.shields.io/badge/Redis-7-DC382D?logo=redis&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white)
+
 Sport-agnostic Monte Carlo engine (port 8003) producing score, margin, and total distributions
 for sports matchups via pluggable per-sport simulators. Player-level distributions and
 correlation outputs feed the prop and parlay math downstream. Results are cached in Redis —
