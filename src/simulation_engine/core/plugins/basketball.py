@@ -33,6 +33,7 @@ unchanged and applies when the COMBINED score is tied. The pregame path
 (live_state=None) is bit-identical to pre-Wave-2 behavior.
 """
 
+import logging
 from dataclasses import dataclass
 
 import numpy as np
@@ -40,8 +41,10 @@ import numpy.typing as npt
 
 from simulation_engine.core import league_averages as lg
 from simulation_engine.core.calibrate import calibrate_distribution
-from simulation_engine.core.framework import GameResult, GameSimulator
-from simulation_engine.core.params import GameContext, SportParams, TeamParams
+from simulation_engine.core.framework import BatchResult, GameResult, GameSimulator
+from simulation_engine.core.params import GameContext, PlayerRates, SportParams, TeamParams
+
+logger = logging.getLogger(__name__)
 
 _MAX_POINTS_PER_POSSESSION = 3
 _MAKE_PROB_FLOOR = 0.05
@@ -140,6 +143,8 @@ class BasketballSimulator(GameSimulator):
         self._live_fraction: float | None = None
         self._offset_home = 0
         self._offset_away = 0
+        self._players_home: list[PlayerRates] = []
+        self._players_away: list[PlayerRates] = []
 
     def set_parameters(self, home_params: SportParams, away_params: SportParams, context: GameContext) -> None:
         if not isinstance(home_params, TeamParams) or not isinstance(away_params, TeamParams):
@@ -223,6 +228,107 @@ class BasketballSimulator(GameSimulator):
     def simulate_game(self, rng: np.random.Generator) -> GameResult:
         home, away = self.simulate_games(rng, 1)
         return GameResult(home_score=int(home[0]), away_score=int(away[0]), metadata={})
+
+    def set_players(self, home: list[PlayerRates], away: list[PlayerRates]) -> None:
+        """Store rosters for the detailed path (Phase 7 Wave 3); survives set_parameters."""
+        self._players_home = list(home)
+        self._players_away = list(away)
+
+    def simulate_games_detailed(self, rng: np.random.Generator, n: int) -> BatchResult:
+        """Team scores plus per-player stat arrays (Phase 7 Wave 3).
+
+        Player allocation model (documented approximations):
+
+        - Each team's SIMULATED points (final score minus any live offset,
+          overtime included) are split across the roster with one multinomial
+          draw per iteration over normalized ``points_weight`` shares
+          (season PPG x minutes share), so player points conserve the team
+          score exactly. Points are allocated one at a time — the multinomial
+          ignores the 1/2/3-point chunking of real scoring, which fattens the
+          per-player distribution slightly less than reality.
+        - Rebounds, assists, and (estimated) threes are INDEPENDENT Poisson
+          draws with season per-game rates scaled by the iteration's pace
+          factor (drawn possessions / expected pace; the pace draw is cheap
+          to reuse here, overtime possessions are ignored in the factor).
+          Poisson is a NegBinomial approximation that understates
+          player-level overdispersion; marginals are the modeling target.
+        - Threes use the ESTIMATED 3PM/game rate from player_rates.py (no
+          made-threes field exists in the stats contract) and are not
+          constrained by the points allocation — within-iteration
+          points/threes consistency is not enforced.
+        - ``player_points_rebounds_assists`` is the SUM of the three arrays,
+          so PRA is correlated with its components by construction.
+
+        The pregame team path (``simulate_games``) is untouched; this path
+        repeats its exact sampling scheme (identical distribution, but player
+        draws advance the shared RNG stream).
+        """
+        if not self._players_home and not self._players_away:
+            home, away = self.simulate_games(rng, n)
+            return BatchResult(home_scores=home, away_scores=away, player_stats={})
+
+        home_model, away_model = self._models()
+        possessions = self._draw_possessions(rng, n)
+        if self._live_fraction is not None:
+            possessions = np.rint(possessions * self._live_fraction).astype(np.int64)
+        home_scores = self._sample_scores(rng, home_model.cdf, possessions)
+        away_scores = self._sample_scores(rng, away_model.cdf, possessions)
+        home_scores = home_scores + np.int32(self._offset_home)
+        away_scores = away_scores + np.int32(self._offset_away)
+        tied = home_scores == away_scores
+        while bool(tied.any()):
+            n_tied = int(tied.sum())
+            ot_poss = np.full(n_tied, self._ot_possessions, dtype=np.int64)
+            home_scores[tied] += self._sample_scores(rng, home_model.cdf, ot_poss)
+            away_scores[tied] += self._sample_scores(rng, away_model.cdf, ot_poss)
+            tied = home_scores == away_scores
+
+        # Allocate only the simulated points: for live runs the points already
+        # on the board cannot be attributed to players.
+        pace_factor = possessions.astype(np.float64) / self._game_pace
+        player_stats: dict[str, dict[str, npt.NDArray[np.int32]]] = {}
+        for roster, team_points in (
+            (self._players_home, home_scores - np.int32(self._offset_home)),
+            (self._players_away, away_scores - np.int32(self._offset_away)),
+        ):
+            self._allocate_team(rng, roster, team_points, pace_factor, player_stats)
+        return BatchResult(home_scores=home_scores, away_scores=away_scores, player_stats=player_stats)
+
+    @staticmethod
+    def _allocate_team(
+        rng: np.random.Generator,
+        roster: list[PlayerRates],
+        team_points: npt.NDArray[np.int32],
+        pace_factor: npt.NDArray[np.float64],
+        player_stats: dict[str, dict[str, npt.NDArray[np.int32]]],
+    ) -> None:
+        if not roster:
+            logger.info("basketball player allocation skipped: empty roster (no player output for this team)")
+            return
+        weights = np.array([player.rates.get("points_weight", 0.0) for player in roster], dtype=np.float64)
+        total = weights.sum()
+        if total <= 0.0:
+            logger.info("basketball player allocation skipped: zero points-weight mass (no player output)")
+            return
+        shares = weights / total
+        reb_rates = np.array([player.rates.get("rebounds_per_game", 0.0) for player in roster], dtype=np.float64)
+        ast_rates = np.array([player.rates.get("assists_per_game", 0.0) for player in roster], dtype=np.float64)
+        three_rates = np.array([player.rates.get("threes_per_game", 0.0) for player in roster], dtype=np.float64)
+
+        points = rng.multinomial(team_points.astype(np.int64), shares).astype(np.int32)  # (n, k)
+        scale = pace_factor[:, np.newaxis]
+        rebounds = rng.poisson(scale * reb_rates[np.newaxis, :]).astype(np.int32)
+        assists = rng.poisson(scale * ast_rates[np.newaxis, :]).astype(np.int32)
+        threes = rng.poisson(scale * three_rates[np.newaxis, :]).astype(np.int32)
+        pra = points + rebounds + assists
+        for j, player in enumerate(roster):
+            player_stats[player.player_id] = {
+                "player_points": points[:, j],
+                "player_rebounds": rebounds[:, j],
+                "player_assists": assists[:, j],
+                "player_threes": threes[:, j],
+                "player_points_rebounds_assists": pra[:, j],
+            }
 
     def get_sport(self) -> str:
         return "BASKETBALL"

@@ -70,6 +70,12 @@ class SimulationOutput:
     # {total line t: P(total == t)} for integer lines only.
     total_pushes: dict[float, float] = field(default_factory=dict)
 
+    # Per-player stat arrays (Phase 7 Wave 3): player UUID -> canonical stat
+    # key -> per-iteration counts, index-aligned with home_scores/away_scores
+    # (same truncation on early convergence). Populated only when the run was
+    # invoked with capture_players=True and the plugin produced player output.
+    player_stats: dict[str, dict[str, npt.NDArray[np.int32]]] = field(default_factory=dict)
+
     elapsed_ms: float = 0.0
 
 
@@ -95,6 +101,7 @@ def run_monte_carlo(
     common_spreads: list[float] | None = None,
     common_totals: list[float] | None = None,
     grid_config: GridConfig = BASKETBALL_GRID_CONFIG,
+    capture_players: bool = False,
 ) -> SimulationOutput:
     started = time.perf_counter()
     rng = np.random.default_rng(seed)
@@ -105,11 +112,23 @@ def run_monte_carlo(
     tracker = ConvergenceTracker(se_threshold=convergence_threshold)
     converged = False
     convergence_iteration: int | None = None
+    # Per-chunk player arrays accumulated in order and concatenated after the
+    # loop, so player arrays keep the exact alignment (and early-convergence
+    # truncation) of the score arrays.
+    player_chunks: dict[str, dict[str, list[npt.NDArray[np.int32]]]] = {}
 
     n = 0
     while n < iterations:
         chunk = min(convergence_check_interval, iterations - n)
-        chunk_home, chunk_away = simulator.simulate_games(rng, chunk)
+        if capture_players:
+            batch = simulator.simulate_games_detailed(rng, chunk)
+            chunk_home, chunk_away = batch.home_scores, batch.away_scores
+            for player_id, stats in batch.player_stats.items():
+                stat_lists = player_chunks.setdefault(player_id, {})
+                for stat_key, values in stats.items():
+                    stat_lists.setdefault(stat_key, []).append(values)
+        else:
+            chunk_home, chunk_away = simulator.simulate_games(rng, chunk)
         home_scores[n : n + chunk] = chunk_home
         away_scores[n : n + chunk] = chunk_away
         n += chunk
@@ -127,6 +146,12 @@ def run_monte_carlo(
     away_scores = away_scores[:n]
     margins = home_scores - away_scores
     totals = home_scores + away_scores
+    # Same alignment discipline as the score arrays: concatenate the ordered
+    # chunks and truncate to the iterations actually run.
+    player_stats = {
+        player_id: {stat_key: np.concatenate(chunks)[:n] for stat_key, chunks in stats.items()}
+        for player_id, stats in player_chunks.items()
+    }
 
     margin_mean = float(np.mean(margins))
     total_mean = float(np.mean(totals))
@@ -167,5 +192,6 @@ def run_monte_carlo(
         total_overs=total_overs,
         spread_pushes=spread_pushes,
         total_pushes=total_pushes,
+        player_stats=player_stats,
         elapsed_ms=(time.perf_counter() - started) * 1000.0,
     )

@@ -12,6 +12,12 @@ class SimulationConfigIn(BaseModel):
     convergence_threshold: float = Field(default=0.005, gt=0.0)
     random_seed: int | None = None
     plugin_config: dict[str, object] = Field(default_factory=dict)
+    # Phase 7 Wave 3: opt into the detailed path that captures per-player
+    # stat distributions (soccer + basketball in v1). False keeps team-level
+    # output byte-identical to pre-Wave-3 behavior; the service strips the
+    # False value from hashed payloads so pregame parameter hashes and
+    # idempotency body hashes are unchanged.
+    include_player_props: bool = False
 
 
 class LiveStateIn(BaseModel):
@@ -158,6 +164,43 @@ class DistributionsData(BaseModel):
     game_id: str
     iterations_completed: int
     distributions: dict[str, Distribution]
+
+
+class PlayerStatBlock(BaseModel):
+    """Distribution plus market-facing probabilities for one player stat (Phase 7 Wave 3).
+
+    OVER_UNDER stats carry ``over_probabilities`` — P(count > line) for
+    half-point lines around the mean (monotonically non-increasing in the
+    line). YES_NO stats (``player_goal_scorer_anytime``, ``player_anytime_td``)
+    carry ``yes_probability`` = P(count > 0) instead of a line grid.
+    """
+
+    distribution: Distribution
+    over_probabilities: dict[str, float] | None = None
+    yes_probability: float | None = None
+
+
+class PlayerPropsEntry(BaseModel):
+    """One player's captured stats keyed by canonical stat key (ADR-029)."""
+
+    name: str
+    team: Literal["HOME", "AWAY"]
+    stats: dict[str, PlayerStatBlock]
+
+
+class PlayerDistributionsData(BaseModel):
+    """Per-player stat distributions for one simulation run (Phase 7 Wave 3).
+
+    ``players`` is keyed by statistics-service player UUID. Stat keys are the
+    canonical Odds API market keys, so downstream services join these to
+    market lines without translation. Empty when props were requested but no
+    roster data existed (dormant sports, empty upstream rosters).
+    """
+
+    simulation_run_id: str
+    game_id: str
+    iterations_completed: int
+    players: dict[str, PlayerPropsEntry]
 
 
 class CorrelationsData(BaseModel):

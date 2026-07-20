@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import time
 import uuid
 from collections import deque
@@ -23,22 +24,28 @@ from simulation_engine.api.models import (
     HealthData,
     HealthLoad,
     LiveStateIn,
+    PlayerDistributionsData,
     SimulationConfigIn,
     SimulationConfigOut,
     SimulationRunData,
 )
 from simulation_engine.cache.redis_cache import SimulationCache
-from simulation_engine.clients.statistics import ProbablePitcher, StatisticsClient
+from simulation_engine.clients.statistics import PlayerDetail, ProbablePitcher, StatisticsClient
 from simulation_engine.config import Settings
 from simulation_engine.core.correlations import CorrelationArtifact, UnknownLegError, build_correlation_artifact
-from simulation_engine.core.hashing import compute_parameters_hash
-from simulation_engine.core.output import build_distributions, build_result
-from simulation_engine.core.params import GameContext, LiveState
+from simulation_engine.core.hashing import compute_parameters_hash, compute_roster_signature
+from simulation_engine.core.output import build_distributions, build_player_distributions, build_result
+from simulation_engine.core.params import GameContext, LiveState, PlayerRates
+from simulation_engine.core.player_rates import build_player_rates
 from simulation_engine.core.plugins import get_plugin
 from simulation_engine.core.runner import run_monte_carlo
 from simulation_engine.events.publisher import publish_simulation_completed
 
+logger = logging.getLogger(__name__)
+
 _TERMINAL_GAME_STATUSES = frozenset({"FINAL", "CANCELLED"})
+#: Concurrent player-detail fetches per roster resolution.
+_ROSTER_FETCH_CONCURRENCY = 8
 
 
 def _utc_now_iso() -> str:
@@ -52,12 +59,27 @@ def _starter_fip(pitcher: ProbablePitcher | None) -> float | None:
     return pitcher.fip
 
 
+def _hashable_config(config: SimulationConfigIn) -> dict[str, object]:
+    """Config payload for hashing with the default include_player_props stripped.
+
+    include_player_props=False (the default) is removed so pregame parameter
+    hashes and idempotency body hashes stay byte-identical to pre-Wave-3
+    hashes; True stays in the payload and yields a distinct hash (a
+    props-enabled run stores different artifacts and must never be replayed
+    from a props-off cache entry, or vice versa).
+    """
+    payload = config.model_dump(mode="json")
+    if not config.include_player_props:
+        payload.pop("include_player_props", None)
+    return payload
+
+
 def _request_body_hash(
     game_id: str, config: SimulationConfigIn, force_refresh: bool, live_state: LiveStateIn | None = None
 ) -> str:
     payload: dict[str, object] = {
         "game_id": game_id,
-        "config": config.model_dump(mode="json"),
+        "config": _hashable_config(config),
         "force_refresh": force_refresh,
     }
     # Included only when set so pregame body hashes (and thus in-flight
@@ -165,6 +187,30 @@ class SimulationService:
         )
         home_params = spec.map_team_stats(home_stats)
         away_params = spec.map_team_stats(away_stats)
+
+        # Player props (Phase 7 Wave 3): resolve both rosters up front so the
+        # roster signature participates in the parameters hash. Empty rosters
+        # (dormant sports, stubbed providers) proceed WITHOUT player output;
+        # only transport errors hard-fail.
+        player_rates_home: list[PlayerRates] = []
+        player_rates_away: list[PlayerRates] = []
+        roster_signature: str | None = None
+        if config.include_player_props:
+            home_roster, away_roster = await asyncio.gather(
+                self._fetch_roster(game.league, game.home_team.id),
+                self._fetch_roster(game.league, game.away_team.id),
+            )
+            player_rates_home = build_player_rates(spec.label, home_roster, "HOME")
+            player_rates_away = build_player_rates(spec.label, away_roster, "AWAY")
+            if not player_rates_home and not player_rates_away:
+                logger.warning(
+                    "include_player_props requested for game %s (%s) but no usable roster data exists; "
+                    "proceeding without player output",
+                    game_id,
+                    game.league,
+                )
+            roster_signature = compute_roster_signature(player_rates_home, player_rates_away)
+
         # Probable starters (BASEBALL leagues) enter the context — and thus
         # the parameters hash — so a starter announcement invalidates cached
         # simulations. The baseball plugin applies each starter to the
@@ -172,13 +218,15 @@ class SimulationService:
         # live_state (when set) enters the context — and thus the parameter
         # hash — so every distinct in-game state gets its own cache entry
         # while pregame (live_state=None) hashes stay byte-identical.
+        # roster_signature (when props are on) does the same for rosters.
         context = GameContext(
             league=game.league,
             home_starter_fip=_starter_fip(game.home_probable_pitcher),
             away_starter_fip=_starter_fip(game.away_probable_pitcher),
             live_state=live,
+            roster_signature=roster_signature,
         )
-        config_dict = config.model_dump(mode="json")
+        config_dict = _hashable_config(config)
         parameters_hash = compute_parameters_hash(
             game_id, home_params, away_params, context, config_dict, plugin_label=spec.label
         )
@@ -191,6 +239,8 @@ class SimulationService:
                     return cached_run.model_copy(update={"cached": True})
 
         simulator = spec.simulator({**spec.plugin_config, **config.plugin_config})
+        if config.include_player_props:
+            simulator.set_players(player_rates_home, player_rates_away)
         started_at = _utc_now_iso()
         self._queued += 1
         async with self._semaphore:
@@ -208,6 +258,7 @@ class SimulationService:
                     self._settings.convergence_check_interval,
                     config.random_seed,
                     grid_config=spec.grid_config,
+                    capture_players=config.include_player_props,
                 )
             finally:
                 self._active -= 1
@@ -244,11 +295,48 @@ class SimulationService:
             include_draw=simulator.get_sport() == "SOCCER",
             joint_goal_grid=simulator.joint_grid(),
         ).to_payload()
-        await self._cache.store_run(run, distributions, correlations)
+        # Player distributions (Phase 7 Wave 3): built from the in-memory
+        # arrays for the same reason as correlations — the raw samples are
+        # not retained past this point. Stored whenever props were REQUESTED
+        # (even with empty player output) so the read path can distinguish
+        # "captured, no roster data" (200 with empty players) from "not
+        # captured" (404).
+        player_distributions: dict[str, object] | None = None
+        if config.include_player_props:
+            roster_index = {p.player_id: p for p in player_rates_home + player_rates_away}
+            players = build_player_distributions(output, roster_index)
+            player_distributions = {
+                "game_id": game_id,
+                "iterations_completed": output.iterations_run,
+                "players": {player_id: entry.model_dump(mode="json") for player_id, entry in players.items()},
+            }
+        await self._cache.store_run(run, distributions, correlations, player_distributions)
         await publish_simulation_completed(self._redis, run, game.league)
         if idempotency_key is not None:
             await self._cache.store_idempotent(idempotency_key, body_hash, run.simulation_run_id)
         return run
+
+    async def _fetch_roster(self, league: str, team_id: str) -> list[PlayerDetail]:
+        """Resolve one team's roster to player details with bounded concurrency.
+
+        Individual players that 404 mid-roster are skipped with a warning
+        (stale roster entries must not fail the whole run); transport errors
+        (DependencyError / DependencyTimeoutError) propagate and fail the
+        request, per the Wave 3 contract.
+        """
+        summaries = await self._statistics.get_team_players(league, team_id)
+        semaphore = asyncio.Semaphore(_ROSTER_FETCH_CONCURRENCY)
+
+        async def fetch(player_id: str) -> PlayerDetail | None:
+            async with semaphore:
+                try:
+                    return await self._statistics.get_player(player_id)
+                except NotFoundError:
+                    logger.warning("player %s listed on team %s roster but not found; skipping", player_id, team_id)
+                    return None
+
+        details = await asyncio.gather(*(fetch(summary.id) for summary in summaries))
+        return [detail for detail in details if detail is not None]
 
     async def get_run(self, simulation_id: str) -> SimulationRunData:
         run = await self._cache.get_run(simulation_id)
@@ -277,6 +365,50 @@ class SimulationService:
                 "game_id": run.game_id,
                 "iterations_completed": run.iterations_completed,
                 "distributions": distributions,
+            }
+        )
+
+    async def get_player_distributions(
+        self,
+        simulation_id: str,
+        player_id: str | None = None,
+        stat_type: str | None = None,
+    ) -> PlayerDistributionsData:
+        """Player stat distributions for a run (Phase 7 Wave 3).
+
+        Mirrors the correlations read-path semantics: 404 when the run is no
+        longer the latest for its game or player props were not captured.
+        Optional filters narrow to one player and/or one canonical stat key;
+        filters that match nothing 404 (unknown player, uncaptured stat).
+        """
+        run = await self.get_run(simulation_id)
+        stored = await self._cache.get_player_distributions(run.game_id)
+        if stored is None or stored.get("simulation_run_id") != simulation_id:
+            raise NotFoundError(
+                f"Player distributions for simulation {simulation_id} are not available "
+                "(run without include_player_props, or superseded by a newer run)"
+            )
+        players = stored.get("players")
+        players = dict(players) if isinstance(players, dict) else {}
+        if player_id is not None:
+            if player_id not in players:
+                raise NotFoundError(f"Player {player_id} has no captured distributions in simulation {simulation_id}")
+            players = {player_id: players[player_id]}
+        if stat_type is not None:
+            filtered = {
+                pid: {**entry, "stats": {stat_type: entry["stats"][stat_type]}}
+                for pid, entry in players.items()
+                if isinstance(entry, dict) and stat_type in entry.get("stats", {})
+            }
+            if players and not filtered:
+                raise NotFoundError(f"Stat {stat_type!r} was not captured in simulation {simulation_id}")
+            players = filtered
+        return PlayerDistributionsData.model_validate(
+            {
+                "simulation_run_id": simulation_id,
+                "game_id": run.game_id,
+                "iterations_completed": stored.get("iterations_completed", run.iterations_completed),
+                "players": players,
             }
         )
 

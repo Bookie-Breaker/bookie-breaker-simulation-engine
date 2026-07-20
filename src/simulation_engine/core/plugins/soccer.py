@@ -21,6 +21,7 @@ is added as a constant offset to every sampled final score. The pregame path
 (live_state=None) is bit-identical to pre-Wave-2 behavior.
 """
 
+import logging
 from dataclasses import dataclass
 
 import numpy as np
@@ -28,9 +29,11 @@ import numpy.typing as npt
 
 from simulation_engine.clients.statistics import TeamStats
 from simulation_engine.core import league_averages as lg
-from simulation_engine.core.framework import GameResult, GameSimulator
-from simulation_engine.core.params import GameContext, SportParams
+from simulation_engine.core.framework import BatchResult, GameResult, GameSimulator
+from simulation_engine.core.params import GameContext, PlayerRates, SportParams
 from simulation_engine.core.poisson_grid import build_goal_grid, poisson_pmf, sample_grid
+
+logger = logging.getLogger(__name__)
 
 _MAX_GOALS = 12
 _GRID_SIZE = _MAX_GOALS + 1
@@ -105,6 +108,8 @@ class SoccerSimulator(GameSimulator):
         self._offset_away = 0
         self._grid: npt.NDArray[np.float64] | None = None
         self._cdf: npt.NDArray[np.float64] | None = None
+        self._players_home: list[PlayerRates] = []
+        self._players_away: list[PlayerRates] = []
 
     def set_parameters(self, home_params: SportParams, away_params: SportParams, context: GameContext) -> None:
         if not isinstance(home_params, SoccerParams) or not isinstance(away_params, SoccerParams):
@@ -151,6 +156,76 @@ class SoccerSimulator(GameSimulator):
     def simulate_game(self, rng: np.random.Generator) -> GameResult:
         home, away = self.simulate_games(rng, 1)
         return GameResult(home_score=int(home[0]), away_score=int(away[0]), metadata={})
+
+    def set_players(self, home: list[PlayerRates], away: list[PlayerRates]) -> None:
+        """Store rosters for the detailed path (Phase 7 Wave 3); survives set_parameters."""
+        self._players_home = list(home)
+        self._players_away = list(away)
+
+    def simulate_games_detailed(self, rng: np.random.Generator, n: int) -> BatchResult:
+        """Team scores plus per-player goal/shot arrays (Phase 7 Wave 3).
+
+        Player allocation model (documented approximations):
+
+        - Each team's SIMULATED goals (the sampled remainder for live runs —
+          goals already on the board cannot be attributed) are split across
+          the roster with one multinomial draw per iteration over the
+          precomputed ``goal_share`` vector, so player goals conserve team
+          goals exactly and inherit the Dixon-Coles team correlation.
+        - ``player_goal_scorer_anytime`` is the per-player goals array itself;
+          the output layer settles it YES/NO as P(goals > 0).
+        - Shots and shots-on-target are INDEPENDENT Poisson draws per
+          iteration with per-player per-match rates (season shots per
+          appearance = per-90 rate x expected minutes fraction). They are not
+          coupled to each other or to goals, so team-level correlation flows
+          only through the goal allocation — a player can sample more goals
+          than shots on target in an iteration; marginal distributions are
+          the modeling target, not within-iteration consistency.
+
+        The pregame team path (``simulate_games``) is untouched; this method
+        draws from the same grid, so team-level arrays here are statistically
+        identical (not byte-identical across chunks, since player draws
+        advance the shared RNG stream).
+        """
+        home_raw, away_raw = sample_grid(rng, self._require_cdf(), _GRID_SIZE, n)
+        player_stats: dict[str, dict[str, npt.NDArray[np.int32]]] = {}
+        for roster, team_goals in ((self._players_home, home_raw), (self._players_away, away_raw)):
+            self._allocate_team(rng, roster, team_goals, player_stats)
+        return BatchResult(
+            home_scores=home_raw + np.int32(self._offset_home),
+            away_scores=away_raw + np.int32(self._offset_away),
+            player_stats=player_stats,
+        )
+
+    @staticmethod
+    def _allocate_team(
+        rng: np.random.Generator,
+        roster: list[PlayerRates],
+        team_goals: npt.NDArray[np.int32],
+        player_stats: dict[str, dict[str, npt.NDArray[np.int32]]],
+    ) -> None:
+        if not roster:
+            logger.info("soccer player allocation skipped: empty roster (no player output for this team)")
+            return
+        shares = np.array([player.rates.get("goal_share", 0.0) for player in roster], dtype=np.float64)
+        total = shares.sum()
+        if total <= 0.0:
+            logger.info("soccer player allocation skipped: zero goal-share mass (no player output for this team)")
+            return
+        shares = shares / total  # guard float drift; player_rates normalizes already
+        shot_rates = np.array([player.rates.get("shots_per_match", 0.0) for player in roster], dtype=np.float64)
+        sot_rates = np.array([player.rates.get("sot_per_match", 0.0) for player in roster], dtype=np.float64)
+
+        n = len(team_goals)
+        goals = rng.multinomial(team_goals.astype(np.int64), shares).astype(np.int32)  # (n, k)
+        shots = rng.poisson(np.broadcast_to(shot_rates, (n, len(roster)))).astype(np.int32)
+        sot = rng.poisson(np.broadcast_to(sot_rates, (n, len(roster)))).astype(np.int32)
+        for j, player in enumerate(roster):
+            player_stats[player.player_id] = {
+                "player_goal_scorer_anytime": goals[:, j],
+                "player_shots": shots[:, j],
+                "player_shots_on_target": sot[:, j],
+            }
 
     def joint_grid(self) -> npt.NDArray[np.float64] | None:
         """The Dixon-Coles joint regulation-score PMF built by set_parameters.

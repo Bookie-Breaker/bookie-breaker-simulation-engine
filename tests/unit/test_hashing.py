@@ -1,7 +1,12 @@
 """Parameter hash stability and sensitivity tests."""
 
-from simulation_engine.core.hashing import HASH_LENGTH, compute_parameters_hash
-from simulation_engine.core.params import GameContext, LiveState
+from simulation_engine.core.hashing import (
+    HASH_LENGTH,
+    ROSTER_SIGNATURE_LENGTH,
+    compute_parameters_hash,
+    compute_roster_signature,
+)
+from simulation_engine.core.params import GameContext, LiveState, PlayerRates
 
 CONFIG = {"iterations": 10_000, "convergence_threshold": 0.005, "random_seed": None, "plugin_config": {}}
 
@@ -153,3 +158,63 @@ class TestLiveStateHashing:
         a1 = compute_parameters_hash("g1", h, a, GameContext(live_state=omitted), dict(CONFIG))
         a2 = compute_parameters_hash("g1", h, a, GameContext(live_state=explicit), dict(CONFIG))
         assert a1 == a2
+
+
+def make_player(player_id: str, team: str = "HOME", goal_share: float = 0.5) -> PlayerRates:
+    return PlayerRates(
+        player_id=player_id,
+        name=player_id.upper(),
+        position="F",
+        team=team,  # type: ignore[arg-type]
+        rates={"goal_share": goal_share, "shots_per_match": 2.0},
+    )
+
+
+class TestRosterSignatureHashing:
+    """Phase 7 Wave 3: roster_signature enters the hash; pregame hashes untouched.
+
+    roster_signature=None (props off) must preserve the pinned pregame digest
+    byte for byte; a set signature — plus the PROP_ENGINE_VERSION fold that
+    accompanies it — produces a distinct digest, and every distinct roster
+    produces its own digest so roster changes invalidate cached props runs.
+    """
+
+    def test_absent_roster_signature_preserves_pinned_pregame_digest(self, make_team_params) -> None:
+        h, a = make_team_params("h"), make_team_params("a")
+        implicit = compute_parameters_hash("g1", h, a, GameContext(), dict(CONFIG))
+        explicit_none = compute_parameters_hash("g1", h, a, GameContext(roster_signature=None), dict(CONFIG))
+        assert implicit == TestPluginLabel.PRE_REFACTOR_NBA_HASH
+        assert explicit_none == TestPluginLabel.PRE_REFACTOR_NBA_HASH
+
+    def test_props_on_changes_digest(self, make_team_params) -> None:
+        h, a = make_team_params("h"), make_team_params("a")
+        base = compute_parameters_hash("g1", h, a, GameContext(), dict(CONFIG))
+        signature = compute_roster_signature([make_player("p1")], [make_player("p2", team="AWAY")])
+        props_on = compute_parameters_hash("g1", h, a, GameContext(roster_signature=signature), dict(CONFIG))
+        assert base != props_on
+
+    def test_roster_change_changes_digest(self, make_team_params) -> None:
+        h, a = make_team_params("h"), make_team_params("a")
+
+        def digest(home: list[PlayerRates], away: list[PlayerRates]) -> str:
+            signature = compute_roster_signature(home, away)
+            return compute_parameters_hash("g1", h, a, GameContext(roster_signature=signature), dict(CONFIG))
+
+        base = digest([make_player("p1"), make_player("p2")], [make_player("p3", team="AWAY")])
+        dropped = digest([make_player("p1")], [make_player("p3", team="AWAY")])
+        rate_drift = digest([make_player("p1"), make_player("p2", goal_share=0.6)], [make_player("p3", team="AWAY")])
+        empty = digest([], [])
+        assert len({base, dropped, rate_drift, empty}) == 4
+
+    def test_signature_is_order_insensitive_and_stable(self) -> None:
+        p1, p2 = make_player("p1", goal_share=0.7), make_player("p2", goal_share=0.3)
+        away = [make_player("p3", team="AWAY")]
+        assert compute_roster_signature([p1, p2], away) == compute_roster_signature([p2, p1], away)
+        signature = compute_roster_signature([p1, p2], away)
+        assert len(signature) == ROSTER_SIGNATURE_LENGTH
+        assert all(c in "0123456789abcdef" for c in signature)
+
+    def test_signature_sides_are_not_interchangeable(self) -> None:
+        home = [make_player("p1")]
+        away = [make_player("p2", team="AWAY")]
+        assert compute_roster_signature(home, away) != compute_roster_signature(away, home)

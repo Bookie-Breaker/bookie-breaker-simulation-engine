@@ -5,7 +5,8 @@ Parameters the Phase 1 statistics-service contract does not expose
 league averages; two-point percentages are derived from the FG%/3P% mixture.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Literal
 
 from simulation_engine.clients.statistics import TeamStats
 from simulation_engine.core import league_averages as lg
@@ -84,6 +85,33 @@ class LiveState:
 
 
 @dataclass(frozen=True)
+class PlayerRates:
+    """Per-player allocation rates for the player-prop detailed path (Phase 7 Wave 3).
+
+    ``rates`` keys are sport-specific and produced by ``core/player_rates.py``
+    from statistics-service player season stats:
+
+    - SOCCER: ``goal_share`` (normalized within the team, sums to 1.0),
+      ``shots_per_match`` / ``sot_per_match`` (expected shots / shots on
+      target for a typical appearance, i.e. per-90 rate x expected minutes
+      fraction), ``minutes_share`` (typical fraction of a match played).
+    - BASKETBALL: ``points_weight`` (unnormalized share weight: season PPG x
+      minutes share; the plugin normalizes within the team),
+      ``rebounds_per_game`` / ``assists_per_game`` / ``threes_per_game``
+      (season per-game rates; threes are estimated, see player_rates.py),
+      ``minutes_share`` (minutes per game / regulation minutes).
+    - BASEBALL / FOOTBALL: reserved — their statistics providers return empty
+      rosters in v1, so no rates are produced (plugins stay dormant).
+    """
+
+    player_id: str
+    name: str
+    position: str
+    team: Literal["HOME", "AWAY"]
+    rates: dict[str, float] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class GameContext:
     """Game-level context passed to plugins."""
 
@@ -101,6 +129,13 @@ class GameContext:
     # hashes stay byte-identical to pre-Wave-2 hashes and every distinct live
     # state gets its own cache entry for free.
     live_state: LiveState | None = None
+    # Player-prop roster identity (Phase 7 Wave 3). A stable SHA over the
+    # sorted PlayerRates inputs (core/hashing.py compute_roster_signature),
+    # set only when include_player_props is requested. None means props off —
+    # the recursive None-strip keeps pregame hashes byte-identical to
+    # pre-Wave-3 hashes, while any roster change (injury, transfer, rate
+    # drift) naturally invalidates cached props simulations.
+    roster_signature: str | None = None
 
 
 def _derive_two_pct(fg_pct: float, three_pct: float, three_attempt_rate: float) -> float:
