@@ -12,6 +12,7 @@ from simulation_engine.api.models import (
     CorrelationsData,
     DistributionsData,
     DistributionType,
+    PlayerDistributionsData,
     SimulationRequest,
     SimulationRunData,
 )
@@ -76,6 +77,30 @@ async def get_simulation_distributions(
 ) -> Envelope[DistributionsData]:
     """Get raw score/margin/total distributions for a simulation, suitable for visualization."""
     return envelope(await service.get_distributions(simulation_id, distribution_type))
+
+
+@router.get("/simulations/{simulation_id}/player-distributions", response_model=Envelope[PlayerDistributionsData])
+async def get_simulation_player_distributions(
+    simulation_id: SimulationIdPath,
+    service: ServiceDep,
+    player_id: Annotated[
+        str | None, Query(description="Restrict to one player (statistics-service player UUID).")
+    ] = None,
+    stat_type: Annotated[
+        str | None,
+        Query(description="Restrict to one canonical stat key (e.g. 'player_points', 'player_shots')."),
+    ] = None,
+) -> Envelope[PlayerDistributionsData]:
+    """Get per-player stat distributions for a simulation run (Phase 7 Wave 3).
+
+    Available only for runs created with ``config.include_player_props``; 404
+    when props were not captured or the run is no longer the game's latest
+    (player distributions are stored latest-wins per game, like
+    distributions and correlations). Stat keys are the canonical Odds API
+    market keys (ADR-029); YES_NO stats carry ``yes_probability`` instead of
+    an over-probability line grid.
+    """
+    return envelope(await service.get_player_distributions(simulation_id, player_id, stat_type))
 
 
 @router.get("/simulations/{simulation_id}/correlations", response_model=Envelope[CorrelationsData])

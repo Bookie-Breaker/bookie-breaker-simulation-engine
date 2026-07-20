@@ -56,6 +56,7 @@ when the COMBINED score is tied after the remaining regulation drives. The
 pregame path (live_state=None) is bit-identical to pre-Wave-2 behavior.
 """
 
+import logging
 from dataclasses import dataclass
 
 import numpy as np
@@ -64,8 +65,10 @@ import numpy.typing as npt
 from simulation_engine.clients.statistics import TeamStats
 from simulation_engine.core import league_averages as lg
 from simulation_engine.core.calibrate import calibrate_distribution
-from simulation_engine.core.framework import GameResult, GameSimulator
-from simulation_engine.core.params import GameContext, SportParams
+from simulation_engine.core.framework import BatchResult, GameResult, GameSimulator
+from simulation_engine.core.params import GameContext, PlayerRates, SportParams
+
+logger = logging.getLogger(__name__)
 
 _MAX_POINTS_PER_DRIVE = 7
 _SUPPORT = _MAX_POINTS_PER_DRIVE + 1
@@ -203,6 +206,8 @@ class FootballSimulator(GameSimulator):
         self._live_possession: str | None = None
         self._offset_home = 0
         self._offset_away = 0
+        self._players_home: list[PlayerRates] = []
+        self._players_away: list[PlayerRates] = []
         # Diagnostics from the most recent simulate_games call.
         self._last_regulation_ties = 0
         self._last_standing_ties = 0
@@ -365,6 +370,26 @@ class FootballSimulator(GameSimulator):
     def simulate_game(self, rng: np.random.Generator) -> GameResult:
         home, away = self.simulate_games(rng, 1)
         return GameResult(home_score=int(home[0]), away_score=int(away[0]), metadata={})
+
+    def set_players(self, home: list[PlayerRates], away: list[PlayerRates]) -> None:
+        """Store rosters (Phase 7 Wave 3 plumbing). Football player props are
+        DORMANT in v1: the NFL/NCAA_FB statistics providers return empty
+        rosters, so no allocation model exists yet. The roster is stored so
+        the wiring is exercised end-to-end and a future passing/rushing/
+        receiving model (player_pass_yds, player_rush_yds,
+        player_reception_yds, player_receptions, player_anytime_td) can slot
+        in without touching callers.
+        """
+        self._players_home = list(home)
+        self._players_away = list(away)
+
+    def simulate_games_detailed(self, rng: np.random.Generator, n: int) -> BatchResult:
+        """Team scores with EMPTY player stats: football props are dormant until
+        real roster data exists upstream (see set_players)."""
+        if self._players_home or self._players_away:
+            logger.info("football player props are dormant until real roster data exists; returning no player output")
+        home, away = self.simulate_games(rng, n)
+        return BatchResult(home_scores=home, away_scores=away, player_stats={})
 
     def get_sport(self) -> str:
         return "FOOTBALL"

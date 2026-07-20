@@ -11,13 +11,16 @@ Distributions — and the ``sim:correlations:{game_id}`` parlay-correlation
 artifact (Phase 7 Wave 1) — are stored zlib-compressed then base64-encoded so
 a single ``decode_responses=True`` client can be used throughout.
 
-``sim:distributions:{game_id}`` and ``sim:correlations:{game_id}`` are
-game-scoped LATEST-RUN blobs by design: each stores the run id it belongs to,
-and the read path 404s when the requested run is no longer the latest. Live
+``sim:distributions:{game_id}``, ``sim:correlations:{game_id}``, and
+``sim:player_distributions:{game_id}`` (Phase 7 Wave 3) are game-scoped
+LATEST-RUN blobs by design: each stores the run id it belongs to, and the
+read path 404s when the requested run is no longer the latest. Live
 re-simulations (Phase 7 Wave 2) therefore overwrite a game's pregame blobs
 with latest-wins semantics — never a collision, because run reuse is keyed by
 ``sim:result:{game_id}:{parameters_hash}`` and live runs carry a distinct
-parameters hash.
+parameters hash. The player blob is written only by props-enabled runs; a
+later props-off run leaves the stale blob in place, and the run-id check on
+the read path turns it into a 404 rather than serving mismatched data.
 """
 
 import base64
@@ -70,6 +73,13 @@ class SimulationCache:
         decoded: dict[str, object] = json.loads(zlib.decompress(base64.b64decode(raw)))
         return decoded
 
+    async def get_player_distributions(self, game_id: str) -> dict[str, object] | None:
+        raw = await self._redis.get(f"sim:player_distributions:{game_id}")
+        if raw is None:
+            return None
+        decoded: dict[str, object] = json.loads(zlib.decompress(base64.b64decode(raw)))
+        return decoded
+
     @staticmethod
     def _compress_blob(run_id: str, payload: Mapping[str, object]) -> str:
         return base64.b64encode(zlib.compress(json.dumps({"simulation_run_id": run_id, **payload}).encode())).decode()
@@ -79,8 +89,15 @@ class SimulationCache:
         run: SimulationRunData,
         distributions: Mapping[str, object],
         correlations: Mapping[str, object],
+        player_distributions: Mapping[str, object] | None = None,
     ) -> None:
-        """Persist all read paths for a completed run in one pipeline."""
+        """Persist all read paths for a completed run in one pipeline.
+
+        ``player_distributions`` is written only when the run captured player
+        props (Phase 7 Wave 3); None (props off) leaves any previous game
+        blob untouched — its embedded run id no longer matches the latest
+        run, so the read path 404s instead of serving stale data.
+        """
         result_fields: dict[FieldT, EncodableT] = {
             "simulation_run_id": run.simulation_run_id,
             "home_win_prob": run.result.home_win_probability,
@@ -106,6 +123,9 @@ class SimulationCache:
         pipe.set(f"sim:latest:{run.game_id}", run.simulation_run_id, ex=self._result_ttl)
         pipe.set(f"sim:distributions:{run.game_id}", distributions_blob, ex=self._result_ttl)
         pipe.set(f"sim:correlations:{run.game_id}", correlations_blob, ex=self._result_ttl)
+        if player_distributions is not None:
+            player_blob = self._compress_blob(run.simulation_run_id, player_distributions)
+            pipe.set(f"sim:player_distributions:{run.game_id}", player_blob, ex=self._result_ttl)
         pipe.incr(self._daily_counter_key())
         pipe.expire(self._daily_counter_key(), 172_800)
         await pipe.execute()

@@ -183,6 +183,68 @@ class TeamStats(BaseModel):
     hockey: HockeyStats = HockeyStats()
 
 
+class PlayerSeasonStats(BaseModel):
+    """Basketball-shaped player season averages (statistics-service PlayerSeasonStats).
+
+    Populated for NBA; other leagues may carry zeros or omit the block.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    season: int = 0
+    games_played: int = 0
+    minutes_per_game: float = 0.0
+    points_per_game: float = 0.0
+    rebounds_per_game: float = 0.0
+    assists_per_game: float = 0.0
+    steals_per_game: float = 0.0
+    blocks_per_game: float = 0.0
+    field_goal_pct: float = 0.0
+    three_point_pct: float = 0.0
+    free_throw_pct: float = 0.0
+
+
+class SoccerSeasonStats(BaseModel):
+    """Soccer player season totals (statistics-service SoccerSeasonStats; SOCCER leagues only)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    appearances: int = 0
+    minutes: int = 0
+    goals: int = 0
+    assists: int = 0
+    shots: int = 0
+    shots_on_target: int = 0
+    yellow_cards: int = 0
+    red_cards: int = 0
+
+
+class PlayerSummary(BaseModel):
+    """Roster entry from GET /api/v1/stats/players (Phase 7 Wave 0 surface)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: str
+    team_id: str = ""
+    first_name: str = ""
+    last_name: str = ""
+    position: str = ""
+    status: str = ""
+
+
+class PlayerDetail(PlayerSummary):
+    """Player detail from GET /api/v1/stats/players/{player_id}.
+
+    ``season_stats`` is the basketball-shaped block (NBA populated);
+    ``soccer_season_stats`` is set for SOCCER leagues only. MLB/NFL rosters
+    are empty in v1 (their providers stub Players()), so callers must degrade
+    gracefully when neither block is present.
+    """
+
+    season_stats: PlayerSeasonStats | None = None
+    soccer_season_stats: SoccerSeasonStats | None = None
+
+
 class StatisticsClient:
     def __init__(self, base_url: str, client: httpx.AsyncClient) -> None:
         self._base_url = base_url.rstrip("/")
@@ -206,6 +268,32 @@ class StatisticsClient:
             raise DependencyError(f"statistics-service returned a malformed envelope for {resource}")
         return data
 
+    async def _get_page(self, path: str, resource: str) -> tuple[list[dict[str, object]], str | None]:
+        """Fetch one page of a list endpoint: (items, next_cursor when has_more)."""
+        url = f"{self._base_url}{path}"
+        try:
+            response = await self._client.get(url)
+        except httpx.TimeoutException as exc:
+            raise DependencyTimeoutError(f"statistics-service timed out fetching {resource}") from exc
+        except httpx.HTTPError as exc:
+            raise DependencyError(f"statistics-service is unavailable: {exc}") from exc
+        if response.status_code == 404:
+            raise NotFoundError(f"{resource} not found in statistics-service")
+        if response.status_code >= 500:
+            raise DependencyError(f"statistics-service returned {response.status_code} for {resource}")
+        payload: dict[str, object] = response.json()
+        data = payload.get("data")
+        if not isinstance(data, list):
+            raise DependencyError(f"statistics-service returned a malformed envelope for {resource}")
+        meta = payload.get("meta")
+        pagination = meta.get("pagination") if isinstance(meta, dict) else None
+        next_cursor: str | None = None
+        if isinstance(pagination, dict) and pagination.get("has_more"):
+            cursor = pagination.get("next_cursor")
+            next_cursor = cursor if isinstance(cursor, str) and cursor else None
+        items = [item for item in data if isinstance(item, dict)]
+        return items, next_cursor
+
     async def get_game(self, game_id: str) -> Game:
         data = await self._get(f"/api/v1/stats/games/{game_id}", f"game {game_id}")
         return Game.model_validate(data)
@@ -224,6 +312,30 @@ class StatisticsClient:
             football=parsed.stats.football,
             hockey=parsed.stats.hockey,
         )
+
+    async def get_team_players(self, league: str, team_id: str) -> list[PlayerSummary]:
+        """List a team's roster (Phase 7 Wave 3). Empty list when the provider has no roster data.
+
+        Follows cursor pagination defensively (rosters fit one 200-item page;
+        the loop is capped so a misbehaving cursor can never spin forever).
+        """
+        players: list[PlayerSummary] = []
+        cursor: str | None = None
+        resource = f"players for team {team_id}"
+        for _ in range(5):  # safety cap: 5 pages x 200 >> any real roster
+            path = f"/api/v1/stats/players?league={league}&team_id={team_id}&limit=200"
+            if cursor is not None:
+                path += f"&cursor={cursor}"
+            items, cursor = await self._get_page(path, resource)
+            players.extend(PlayerSummary.model_validate(item) for item in items)
+            if cursor is None:
+                break
+        return players
+
+    async def get_player(self, player_id: str) -> PlayerDetail:
+        """Fetch one player's detail including season stat blocks (Phase 7 Wave 3)."""
+        data = await self._get(f"/api/v1/stats/players/{player_id}", f"player {player_id}")
+        return PlayerDetail.model_validate(data)
 
     async def is_healthy(self) -> bool:
         try:

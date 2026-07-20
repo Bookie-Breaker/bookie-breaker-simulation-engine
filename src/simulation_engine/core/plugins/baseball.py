@@ -68,6 +68,7 @@ unchanged. The pregame path (live_state=None) is bit-identical to
 pre-Wave-2 behavior.
 """
 
+import logging
 from dataclasses import dataclass
 
 import numpy as np
@@ -76,8 +77,10 @@ import numpy.typing as npt
 from simulation_engine.clients.statistics import TeamStats
 from simulation_engine.core import league_averages as lg
 from simulation_engine.core.calibrate import calibrate_distribution
-from simulation_engine.core.framework import GameResult, GameSimulator
-from simulation_engine.core.params import GameContext, LiveState, SportParams
+from simulation_engine.core.framework import BatchResult, GameResult, GameSimulator
+from simulation_engine.core.params import GameContext, LiveState, PlayerRates, SportParams
+
+logger = logging.getLogger(__name__)
 
 _MAX_RUNS_PER_HALF_INNING = 10
 _SUPPORT = _MAX_RUNS_PER_HALF_INNING + 1
@@ -243,6 +246,8 @@ class BaseballSimulator(GameSimulator):
         self._home_batting: _BattingModel | None = None
         self._away_batting: _BattingModel | None = None
         self._live_plan: _LivePlan | None = None
+        self._players_home: list[PlayerRates] = []
+        self._players_away: list[PlayerRates] = []
         # Diagnostics from the most recent simulate_games call.
         self._last_extra_inning_games = 0
         self._last_forced_tiebreaks = 0
@@ -426,6 +431,25 @@ class BaseballSimulator(GameSimulator):
     def simulate_game(self, rng: np.random.Generator) -> GameResult:
         home, away = self.simulate_games(rng, 1)
         return GameResult(home_score=int(home[0]), away_score=int(away[0]), metadata={})
+
+    def set_players(self, home: list[PlayerRates], away: list[PlayerRates]) -> None:
+        """Store rosters (Phase 7 Wave 3 plumbing). Baseball player props are
+        DORMANT in v1: the MLB/NCAA_BSB statistics providers return empty
+        rosters, so no allocation model exists yet. The roster is stored so
+        the wiring is exercised end-to-end and a future batter/pitcher model
+        (batter_hits, batter_total_bases, batter_home_runs,
+        pitcher_strikeouts) can slot in without touching callers.
+        """
+        self._players_home = list(home)
+        self._players_away = list(away)
+
+    def simulate_games_detailed(self, rng: np.random.Generator, n: int) -> BatchResult:
+        """Team scores with EMPTY player stats: baseball props are dormant until
+        real roster data exists upstream (see set_players)."""
+        if self._players_home or self._players_away:
+            logger.info("baseball player props are dormant until real roster data exists; returning no player output")
+        home, away = self.simulate_games(rng, n)
+        return BatchResult(home_scores=home, away_scores=away, player_stats={})
 
     def get_sport(self) -> str:
         return "BASEBALL"
