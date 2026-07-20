@@ -41,6 +41,19 @@ into the {0, 3, 7} quantization, turnovers appear only implicitly as
 scoreless drives, the sudden-death pair compares full drive outcomes rather
 than stopping at the first score, and the game clock / end-of-half drives
 are not modeled beyond the drive-count distribution.
+
+Live re-simulation (Phase 7 Wave 2): with ``context.live_state`` set, each
+iteration draws its full-game drive count as usual and then simulates only
+the remaining drives, adding the current score as a constant offset. Without
+``possession`` both teams get ``round(drives x fraction_remaining)`` remaining
+drives; with it, the fractional in-progress drive is assigned to the
+possessing team (``ceil`` for the possession side, ``floor`` for the other).
+``down``/``yardline`` are carried in the hash but do not condition this
+drive-level model (they await a play-level model). Per-drive outcome models
+are unchanged (documented approximation: no live rate adjustment; the pregame
+HFA persists for the remainder), and overtime rules are unchanged, applying
+when the COMBINED score is tied after the remaining regulation drives. The
+pregame path (live_state=None) is bit-identical to pre-Wave-2 behavior.
 """
 
 from dataclasses import dataclass
@@ -186,6 +199,10 @@ class FootballSimulator(GameSimulator):
         self._drives_mu = self._drives_mu_default
         self._home_model: _DriveModel | None = None
         self._away_model: _DriveModel | None = None
+        self._live_fraction: float | None = None
+        self._live_possession: str | None = None
+        self._offset_home = 0
+        self._offset_away = 0
         # Diagnostics from the most recent simulate_games call.
         self._last_regulation_ties = 0
         self._last_standing_ties = 0
@@ -216,6 +233,18 @@ class FootballSimulator(GameSimulator):
         away_target = away_params.points_per_drive_off * home_params.points_per_drive_def / self._league_ppd
         self._home_model = self._drive_model(home_target + shift_per_drive)
         self._away_model = self._drive_model(away_target - shift_per_drive)
+
+        live = context.live_state
+        if live is not None:
+            self._live_fraction = live.fraction_remaining
+            self._live_possession = live.possession
+            self._offset_home = live.home_score
+            self._offset_away = live.away_score
+        else:
+            self._live_fraction = None
+            self._live_possession = None
+            self._offset_home = 0
+            self._offset_away = 0
 
     def _models(self) -> tuple[_DriveModel, _DriveModel]:
         if self._home_model is None or self._away_model is None:
@@ -290,11 +319,39 @@ class FootballSimulator(GameSimulator):
             tied = home_scores == away_scores
         self._last_standing_ties = 0
 
+    def _remaining_drive_counts(
+        self, drive_counts: npt.NDArray[np.int64]
+    ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64]]:
+        """Per-team remaining drive counts for a live run.
+
+        Without possession both sides get ``round(drives x fraction)``; with
+        it, the fractional in-progress drive goes to the possessing team
+        (``ceil``) and the other side gets ``floor``.
+        """
+        assert self._live_fraction is not None
+        scaled = drive_counts * self._live_fraction
+        if self._live_possession is None:
+            both = np.rint(scaled).astype(np.int64)
+            return both, both
+        with_ball = np.ceil(scaled).astype(np.int64)
+        without_ball = np.floor(scaled).astype(np.int64)
+        if self._live_possession == "HOME":
+            return with_ball, without_ball
+        return without_ball, with_ball
+
     def simulate_games(self, rng: np.random.Generator, n: int) -> tuple[npt.NDArray[np.int32], npt.NDArray[np.int32]]:
         home, away = self._models()
         drive_counts = self._draw_drive_counts(rng, n)
-        home_scores = self._sample_game_points(rng, home.regulation_cdf, drive_counts)
-        away_scores = self._sample_game_points(rng, away.regulation_cdf, drive_counts)
+        if self._live_fraction is not None:
+            home_counts, away_counts = self._remaining_drive_counts(drive_counts)
+        else:
+            home_counts = away_counts = drive_counts
+        home_scores = self._sample_game_points(rng, home.regulation_cdf, home_counts)
+        away_scores = self._sample_game_points(rng, away.regulation_cdf, away_counts)
+        # Live runs: final = current score + remainder; tie/OT resolution
+        # below then operates on combined scores. Zero offsets are no-ops.
+        home_scores = home_scores + np.int64(self._offset_home)
+        away_scores = away_scores + np.int64(self._offset_away)
 
         self._last_regulation_ties = int(np.sum(home_scores == away_scores))
         self._last_forced_tiebreaks = 0

@@ -23,6 +23,15 @@ by reusing the soccer plugin's joint-Poisson grid machinery (core/poisson_grid.p
   including OT/SO and the output has NO draws. Full 3-on-3 overtime dynamics
   are deliberately deferred to Phase 7+; regulation-time three-way markets
   would reuse the pre-resolution grid when wanted.
+- **Live re-simulation (Phase 7 Wave 2).** With ``context.live_state`` set,
+  the clipped pregame goal rates are scaled by ``fraction_remaining``
+  (uniform-intensity approximation over regulation; the Dixon-Coles
+  correction is reapplied to the remainder grid), the grid covers only the
+  REGULATION time remaining, and the current score is added as a constant
+  offset. OT/shootout resolution is unchanged and applies when the COMBINED
+  score (current + sampled remainder) is tied at regulation end; the winner
+  draw uses the live rates, whose ratio equals the pregame ratio. The
+  pregame path (live_state=None) is bit-identical to pre-Wave-2 behavior.
 """
 
 from dataclasses import dataclass
@@ -100,6 +109,8 @@ class HockeySimulator(GameSimulator):
         self._league = self._league_override or "NHL"
         self._lam_home = 0.0
         self._lam_away = 0.0
+        self._offset_home = 0
+        self._offset_away = 0
         self._grid: npt.NDArray[np.float64] | None = None
         self._cdf: npt.NDArray[np.float64] | None = None
         # Diagnostics from the most recent simulate_games call.
@@ -137,6 +148,20 @@ class HockeySimulator(GameSimulator):
         )
         self._lam_home = float(np.clip(lam_home, _LAMBDA_MIN, _LAMBDA_MAX))
         self._lam_away = float(np.clip(lam_away, _LAMBDA_MIN, _LAMBDA_MAX))
+        live = context.live_state
+        if live is not None:
+            # Remainder-of-regulation rates: scale the clipped full-game
+            # lambdas by the fraction of regulation remaining. No
+            # re-clamping — a small remainder legitimately falls below the
+            # pregame lambda floor. The OT winner draw uses the ratio of
+            # these rates, which the common factor leaves unchanged.
+            self._lam_home *= live.fraction_remaining
+            self._lam_away *= live.fraction_remaining
+            self._offset_home = live.home_score
+            self._offset_away = live.away_score
+        else:
+            self._offset_home = 0
+            self._offset_away = 0
         self._grid = build_goal_grid(self._lam_home, self._lam_away, self._dc_rho, _GRID_SIZE)
         cdf = np.cumsum(self._grid.ravel())
         cdf[-1] = 1.0  # guard the inverse-CDF draw against float round-off
@@ -155,6 +180,11 @@ class HockeySimulator(GameSimulator):
 
     def simulate_games(self, rng: np.random.Generator, n: int) -> tuple[npt.NDArray[np.int32], npt.NDArray[np.int32]]:
         home_scores, away_scores = self._sample_regulation(rng, n)
+        # Live runs: regulation final = current score + sampled remainder, so
+        # the tie check below covers games tied at REGULATION END including
+        # the current score. Adding zero offsets pregame changes nothing.
+        home_scores = home_scores + np.int32(self._offset_home)
+        away_scores = away_scores + np.int32(self._offset_away)
 
         tied = home_scores == away_scores
         self._last_regulation_tied = tied.copy()
@@ -182,13 +212,22 @@ class HockeySimulator(GameSimulator):
         return GameResult(home_score=int(home[0]), away_score=int(away[0]), metadata={})
 
     def joint_grid(self) -> npt.NDArray[np.float64] | None:
-        """The 10x10 Dixon-Coles joint REGULATION-score PMF built by set_parameters.
+        """The Dixon-Coles joint REGULATION-score PMF built by set_parameters.
 
         Hockey final scores add +1 to the OT/shootout winner, so this grid is
         the pre-resolution (60-minute) joint distribution — the right object
-        for regulation-time three-way markets, not for final-score legs.
+        for regulation-time three-way markets, not for final-score legs. For
+        live runs the remainder grid is shifted by the current score
+        (zero-padded low rows/columns) so it stays the joint PMF of
+        regulation-end scores.
         """
-        return self._grid
+        if self._grid is None:
+            return None
+        if self._offset_home == 0 and self._offset_away == 0:
+            return self._grid
+        shifted = np.zeros((_GRID_SIZE + self._offset_home, _GRID_SIZE + self._offset_away), dtype=np.float64)
+        shifted[self._offset_home :, self._offset_away :] = self._grid
+        return shifted
 
     def get_sport(self) -> str:
         return "HOCKEY"

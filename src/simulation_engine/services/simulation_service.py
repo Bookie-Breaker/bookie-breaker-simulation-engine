@@ -22,6 +22,7 @@ from simulation_engine.api.models import (
     DistributionType,
     HealthData,
     HealthLoad,
+    LiveStateIn,
     SimulationConfigIn,
     SimulationConfigOut,
     SimulationRunData,
@@ -32,7 +33,7 @@ from simulation_engine.config import Settings
 from simulation_engine.core.correlations import CorrelationArtifact, UnknownLegError, build_correlation_artifact
 from simulation_engine.core.hashing import compute_parameters_hash
 from simulation_engine.core.output import build_distributions, build_result
-from simulation_engine.core.params import GameContext
+from simulation_engine.core.params import GameContext, LiveState
 from simulation_engine.core.plugins import get_plugin
 from simulation_engine.core.runner import run_monte_carlo
 from simulation_engine.events.publisher import publish_simulation_completed
@@ -51,12 +52,68 @@ def _starter_fip(pitcher: ProbablePitcher | None) -> float | None:
     return pitcher.fip
 
 
-def _request_body_hash(game_id: str, config: SimulationConfigIn, force_refresh: bool) -> str:
-    canonical = json.dumps(
-        {"game_id": game_id, "config": config.model_dump(mode="json"), "force_refresh": force_refresh},
-        sort_keys=True,
+def _request_body_hash(
+    game_id: str, config: SimulationConfigIn, force_refresh: bool, live_state: LiveStateIn | None = None
+) -> str:
+    payload: dict[str, object] = {
+        "game_id": game_id,
+        "config": config.model_dump(mode="json"),
+        "force_refresh": force_refresh,
+    }
+    # Included only when set so pregame body hashes (and thus in-flight
+    # idempotency-key records) stay identical to pre-Wave-2 hashes.
+    if live_state is not None:
+        payload["live_state"] = live_state.model_dump(mode="json")
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
+_VALID_BASES = frozenset({"---", "1--", "-2-", "--3", "12-", "1-3", "-23", "123"})
+_VALID_HALVES = frozenset({"TOP", "BOTTOM"})
+_VALID_POSSESSIONS = frozenset({"HOME", "AWAY"})
+
+
+def _to_live_state(live: LiveStateIn) -> LiveState:
+    """Validate a live-state request body and convert it to the domain dataclass.
+
+    Bounds violations raise 422 UNPROCESSABLE_ENTITY per the Wave 2 contract
+    (see LiveStateIn for why these are not pydantic Field constraints).
+    """
+    problems: list[str] = []
+    if live.home_score < 0 or live.away_score < 0:
+        problems.append("home_score and away_score must be >= 0")
+    if not 0.0 < live.fraction_remaining <= 1.0:
+        problems.append("fraction_remaining must be in (0, 1]")
+    if live.period is not None and live.period < 1:
+        problems.append("period must be >= 1")
+    if live.clock_seconds is not None and live.clock_seconds < 0:
+        problems.append("clock_seconds must be >= 0")
+    if live.bases is not None and live.bases not in _VALID_BASES:
+        problems.append(f"bases must be one of {sorted(_VALID_BASES)}")
+    if live.outs is not None and not 0 <= live.outs <= 2:
+        problems.append("outs must be between 0 and 2")
+    if live.half is not None and live.half not in _VALID_HALVES:
+        problems.append("half must be 'TOP' or 'BOTTOM'")
+    if live.possession is not None and live.possession not in _VALID_POSSESSIONS:
+        problems.append("possession must be 'HOME' or 'AWAY'")
+    if live.down is not None and not 1 <= live.down <= 4:
+        problems.append("down must be between 1 and 4")
+    if live.yardline is not None and not 0 <= live.yardline <= 100:
+        problems.append("yardline must be between 0 and 100")
+    if problems:
+        raise UnprocessableError(f"Invalid live_state: {'; '.join(problems)}")
+    return LiveState(
+        home_score=live.home_score,
+        away_score=live.away_score,
+        fraction_remaining=live.fraction_remaining,
+        period=live.period,
+        clock_seconds=live.clock_seconds,
+        bases=live.bases,
+        outs=live.outs,
+        half=live.half,
+        possession=live.possession,
+        down=live.down,
+        yardline=live.yardline,
     )
-    return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 class SimulationService:
@@ -83,8 +140,10 @@ class SimulationService:
         config: SimulationConfigIn,
         force_refresh: bool = False,
         idempotency_key: str | None = None,
+        live_state: LiveStateIn | None = None,
     ) -> SimulationRunData:
-        body_hash = _request_body_hash(game_id, config, force_refresh)
+        live = _to_live_state(live_state) if live_state is not None else None
+        body_hash = _request_body_hash(game_id, config, force_refresh, live_state)
         if idempotency_key is not None:
             existing = await self._cache.get_idempotent(idempotency_key)
             if existing is not None:
@@ -110,10 +169,14 @@ class SimulationService:
         # the parameters hash — so a starter announcement invalidates cached
         # simulations. The baseball plugin applies each starter to the
         # OPPOSING batting side (home batters face the away starter).
+        # live_state (when set) enters the context — and thus the parameter
+        # hash — so every distinct in-game state gets its own cache entry
+        # while pregame (live_state=None) hashes stay byte-identical.
         context = GameContext(
             league=game.league,
             home_starter_fip=_starter_fip(game.home_probable_pitcher),
             away_starter_fip=_starter_fip(game.away_probable_pitcher),
+            live_state=live,
         )
         config_dict = config.model_dump(mode="json")
         parameters_hash = compute_parameters_hash(
@@ -266,6 +329,15 @@ class SimulationService:
         default_config: SimulationConfigIn,
         force_refresh: bool = False,
     ) -> BatchData:
+        # Live re-simulation is single-game only in v1 (Phase 7 Wave 2):
+        # reject the whole batch up front rather than per-game so the caller
+        # gets an unambiguous 422 instead of a partial batch.
+        rejected = [entry.game_id for entry in games if entry.live_state is not None]
+        if rejected:
+            raise UnprocessableError(
+                "live_state is not supported in batch simulations; "
+                f"use POST /simulations per game (offending game_ids: {', '.join(rejected)})"
+            )
         batch_id = str(uuid.uuid4())
         started_at = _utc_now_iso()
         started = time.perf_counter()
