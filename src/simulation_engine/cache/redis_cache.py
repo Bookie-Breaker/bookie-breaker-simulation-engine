@@ -25,6 +25,7 @@ the read path turns it into a 404 rather than serving mismatched data.
 
 import base64
 import json
+import logging
 import zlib
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -33,6 +34,8 @@ import redis.asyncio as aioredis
 from redis.typing import EncodableT, FieldT
 
 from simulation_engine.api.models import SimulationRunData
+
+logger = logging.getLogger(__name__)
 
 
 class SimulationCache:
@@ -114,6 +117,15 @@ class SimulationCache:
         }
         distributions_blob = self._compress_blob(run.simulation_run_id, distributions)
         correlations_blob = self._compress_blob(run.simulation_run_id, correlations)
+        # Size guard (Phase 7 Wave 4): player legs grow the correlation
+        # artifact (~n_legs x iterations/8 packed before compression), so the
+        # final stored size is logged for observability.
+        logger.debug(
+            "storing run %s blobs: distributions=%d B, correlations=%d B",
+            run.simulation_run_id,
+            len(distributions_blob),
+            len(correlations_blob),
+        )
 
         pipe = self._redis.pipeline(transaction=False)
         result_key = self._result_key(run.game_id, run.parameters_hash)
